@@ -7,6 +7,13 @@ echo AudioCapture Build Script
 echo ========================================
 echo.
 
+REM Determine vcpkg toolchain path (use VCPKG_ROOT env var if available, otherwise default)
+if defined VCPKG_ROOT (
+    set "VCPKG_TOOLCHAIN=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake"
+) else (
+    set "VCPKG_TOOLCHAIN=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+)
+
 REM Check if build directory exists and has CMakeCache.txt
 if not exist "build\CMakeCache.txt" (
     echo Creating/Configuring build directory...
@@ -14,7 +21,7 @@ if not exist "build\CMakeCache.txt" (
     cd build
 
     echo Configuring CMake...
-    "C:\Program Files\CMake\bin\cmake.exe" .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
+    "C:\Program Files\CMake\bin\cmake.exe" .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=%VCPKG_TOOLCHAIN% -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
 
     if errorlevel 1 (
         echo ERROR: CMake configuration failed!

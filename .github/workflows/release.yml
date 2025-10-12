@@ -1,0 +1,41 @@
+name: Release
+
+on:
+ push:
+  tags:
+   - 'v*'
+
+jobs:
+ build-windows:
+  runs-on: windows-2022
+
+  steps:
+   - name: Checkout code
+    uses: actions/checkout@v4
+
+   - name: Setup vcpkg
+    uses: lukka/run-vcpkg@v11
+    with:
+     vcpkgJsonGlob: 'vcpkg.json'
+
+   - name: Build with build.bat
+    shell: cmd
+    run: |
+     echo | build.bat
+
+   - name: Package release
+    shell: pwsh
+    run: |
+     $tagName = "${{ github.ref_name }}"
+     $zipName = "AudioCapture-$tagName-windows-x64.zip"
+     Compress-Archive -Path "package/*" -DestinationPath $zipName
+
+   - name: Create GitHub Release
+    uses: softprops/action-gh-release@v2
+    with:
+     files: AudioCapture-*.zip
+     draft: false
+     prerelease: false
+     generate_release_notes: false
+    env:
+     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
