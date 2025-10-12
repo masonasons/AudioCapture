@@ -1,7 +1,6 @@
 set(VCPKG_TARGET_ARCHITECTURE x64)
 set(VCPKG_CRT_LINKAGE static)
 set(VCPKG_LIBRARY_LINKAGE static)
-set(VCPKG_PLATFORM_TOOLSET_VERSION 143)
 
 # Use static C/C++ runtime (/MT and /MTd)
-set(VCPKG_CRT_LINKAGE static)
+# Don't specify VCPKG_PLATFORM_TOOLSET_VERSION to use the default available toolset
