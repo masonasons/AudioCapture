@@ -1,0 +1,81 @@
+cmake_minimum_required(VERSION 3.15)
+project(AudioCapture VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Output directories
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Find packages
+find_package(Opus CONFIG REQUIRED)
+find_package(Ogg CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+# Source files
+set(SOURCES
+    src/main.cpp
+    src/AudioCapture.cpp
+    src/ProcessEnumerator.cpp
+    src/WavWriter.cpp
+    src/Mp3Encoder.cpp
+    src/OpusEncoder.cpp
+    src/CaptureManager.cpp
+)
+
+set(HEADERS
+    include/AudioCapture.h
+    include/ProcessEnumerator.h
+    include/WavWriter.h
+    include/Mp3Encoder.h
+    include/OpusEncoder.h
+    include/CaptureManager.h
+    include/resource.h
+)
+
+# Create executable
+add_executable(AudioCapture WIN32 ${SOURCES} ${HEADERS})
+
+# Include directories
+target_include_directories(AudioCapture PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Link Windows libraries and third-party libraries
+target_link_libraries(AudioCapture PRIVATE
+    Avrt.lib
+    Mmdevapi.lib
+    Ksuser.lib
+    Mfplat.lib
+    Mfreadwrite.lib
+    Mfuuid.lib
+    Ole32.lib
+    Shell32.lib
+    Comctl32.lib
+    Shlwapi.lib
+    Propsys.lib
+    RuntimeObject.lib
+    Opus::opus
+    Ogg::ogg
+    nlohmann_json::nlohmann_json
+)
+
+# Enable Windows subsystem
+set_target_properties(AudioCapture PROPERTIES
+    WIN32_EXECUTABLE TRUE
+)
+
+# Add compile definitions
+target_compile_definitions(AudioCapture PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+
+# Enable warnings
+if(MSVC)
+    target_compile_options(AudioCapture PRIVATE /W4)
+else()
+    target_compile_options(AudioCapture PRIVATE -Wall -Wextra)
+endif()
