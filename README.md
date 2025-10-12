@@ -1,6 +1,6 @@
 # Audio Capture - Per-Process Audio Recording
 
-A Windows application for capturing audio from individual processes using WASAPI (Windows Audio Session API). Records audio to WAV, MP3, Opus, or FLAC formats with an accessible Win32 interface.
+A Windows application for capturing audio from individual processes using WASAPI (Windows Audio Session API). Records audio to WAV, MP3, Opus, or FLAC formats with an accessible Win32 interface. Fully self-contained with no external DLL dependencies.
 
 ## Full Disclosure
 
@@ -8,8 +8,9 @@ This was written with Claude Code. It has been tested and does function complete
 
 ## Features
 
-- **Per-Process Audio Capture**: Record audio from specific applications independently
-- **System-Wide Audio Capture**: Option to capture all system audio simultaneously
+- **Per-Process Audio Capture**: Record audio from specific applications independently (Windows 10 2004+ / build 19041+)
+- **System-Wide Audio Capture**: Option to capture all system audio simultaneously (works on all supported Windows versions)
+- **Pause/Resume Recording**: Pause and resume all active recordings with dedicated UI buttons
 - **Microphone Input Capture**: Record from microphone/line-in devices with seamless integration
 - **Multi-Process Recording Modes**:
   - **Separate Files**: Each process records to its own file
@@ -27,14 +28,20 @@ This was written with Claude Code. It has been tested and does function complete
 - **Process Filtering**: Show only processes with active audio output
 - **Window Title Display**: See window titles to easily identify processes
 - **Accessible Win32 UI**: Standard Windows controls with full keyboard navigation and screen reader support
+  - Adaptive UI automatically adjusts based on OS capabilities
+  - Simplified interface on older Windows versions
 - **Real-time Monitoring**: View active recording sessions and data statistics
 - **Settings Persistence**: Automatically saves and restores your preferences
+- **Fully Static Build**: No external DLL dependencies - single executable deployment
 
 ## Requirements
 
 ### System Requirements
-- Windows 10 Build 19045 or later (tested and working)
-- Windows 10 Build 20348 or later (for optimal per-process capture)
+- **Windows 7 or later** - Fully compatible with static C runtime
+  - Windows 7/8/8.1: System audio capture only (simplified UI)
+  - Windows 10 1909 and earlier (build < 19041): System audio capture only
+  - Windows 10 2004+ (build 19041+): Full per-process audio capture with process list
+  - Windows 11: Full per-process audio capture with process list
 
 ### Build Requirements
 - Visual Studio 2019 or later (with C++ Desktop Development workload)
@@ -44,19 +51,21 @@ This was written with Claude Code. It has been tested and does function complete
 - vcpkg (for managing dependencies)
 
 ### Dependencies (via vcpkg)
-- libflac
-- opus
-- ogg
-- nlohmann-json
+- libflac (statically linked)
+- opus (statically linked)
+- libogg (statically linked)
+- nlohmann-json (header-only)
 
 ## Building the Project
 
 ### Prerequisites
 
-1. Install vcpkg dependencies:
+1. Install vcpkg dependencies with static runtime:
 ```cmd
-vcpkg install libflac:x64-windows opus:x64-windows ogg:x64-windows nlohmann-json:x64-windows
+vcpkg install libflac:x64-windows-static-mt opus:x64-windows-static-mt libogg:x64-windows-static-mt nlohmann-json:x64-windows-static-mt
 ```
+
+Note: The `x64-windows-static-mt` triplet ensures static linking of both the libraries and the C/C++ runtime, resulting in a fully self-contained executable with no DLL dependencies.
 
 ### Using the Build Script
 
@@ -67,9 +76,9 @@ build.bat
 ```
 
 This will:
-- Configure CMake with vcpkg integration
-- Build the Release configuration
-- Copy the executable and DLLs to the `package` folder
+- Configure CMake with vcpkg integration (static libraries)
+- Build the Release configuration with static C/C++ runtime
+- Copy the standalone executable to the `package` folder (no DLLs needed)
 
 ### Manual Build with Visual Studio
 
@@ -81,9 +90,9 @@ mkdir build
 cd build
 ```
 
-3. Generate Visual Studio project files with vcpkg:
+3. Generate Visual Studio project files with vcpkg and static runtime:
 ```cmd
-cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
 ```
 
 4. Build the project:
@@ -115,8 +124,10 @@ The executable will be in `build\bin\AudioCapture.exe`
 
 ### Starting the Application
 
-1. Run `AudioCapture.exe`
-2. The main window will display a list of running processes with their window titles
+1. Run `AudioCapture.exe` (no installation or additional DLLs required)
+2. The main window will display:
+   - **Windows 10 2004+**: A list of running processes with their window titles for per-process capture
+   - **Older Windows**: Simplified interface for system audio capture only
 
 ### Basic Capture (Single Process)
 
@@ -151,7 +162,7 @@ You can send captured audio to another audio device in real-time:
 
 ### Multiple Simultaneous Captures with Recording Modes
 
-You can record multiple processes at once with flexible output options:
+You can record multiple processes at once with flexible output options (Windows 10 2004+ only):
 
 #### Recording Mode Selection
 Choose from the **Multi-process recording** dropdown:
@@ -166,6 +177,14 @@ Choose from the **Multi-process recording** dropdown:
 4. **Monitor Progress**: View all active recordings in the "Active Recordings" list
 5. **Stop Individual Recordings**: Select a recording and click "Stop Capture"
 6. **Stop All**: Click "Stop All" to end all active recordings at once
+
+### Pause and Resume Recording
+
+When multiple recordings are active, you can pause and resume them all at once:
+1. **Pause All**: Pauses all active recordings - audio is not captured while paused
+2. **Resume All**: Resumes all paused recordings from where they left off
+3. Buttons intelligently enable/disable based on the current pause state
+4. Individual recordings cannot be paused - only all recordings together
 
 #### Recording Mode Examples
 - **Separate files**: Recording Discord, Spotify, and Chrome creates three files:
@@ -231,8 +250,9 @@ This application uses WASAPI (Windows Audio Session API) to capture audio from m
 
 #### Loopback Capture (Application Audio)
 - Uses `IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK` for capturing application output
-- Supports true per-process capture on Windows 10 Build 20348+ using `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`
-- Falls back to system-wide capture on older Windows versions (build < 20348)
+- Supports true per-process capture on Windows 10 Build 19041+ (version 2004) using `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`
+- Dynamically loaded API for compatibility - gracefully falls back to system-wide capture on Windows 7/8/10 1909 and earlier
+- Adaptive UI automatically hides process list on unsupported OS versions
 
 #### Input Device Capture (Microphone)
 - Uses `IAudioClient` with capture mode (eCapture data flow direction) for microphone input
@@ -244,6 +264,7 @@ This application uses WASAPI (Windows Audio Session API) to capture audio from m
 - Automatic sample rate conversion and format matching
 - 32-bit float PCM mixing for maximum quality and dynamic range
 - Each stream can simultaneously record to its own file AND contribute to the mixed output
+- Default audio volume set to 100% (1.0x multiplier) for full recording level
 
 ### Supported Audio Formats
 
@@ -295,25 +316,28 @@ The application is structured into several components:
 
 ### Current Limitations
 
-1. **System-Wide Capture**: On Windows versions prior to Build 20348, the application captures all system audio, not just the selected process. The selected process serves as a label for organization.
+1. **Per-Process Capture OS Requirement**: True per-process audio capture requires Windows 10 Build 19041+ (version 2004 or later). On older Windows versions (7/8/8.1/10 1909 and earlier), only system-wide audio capture is available. The UI automatically adapts to show only supported features.
 
 2. **Audio Monitoring Latency**: Real-time audio passthrough operates with approximately 100ms latency. This is optimized for minimal delay while maintaining stability.
 
 3. **Elevated Processes**: Cannot capture audio from processes running with higher privileges unless the application also runs elevated.
 
-4. **First Refresh May Be Slow**: When you first click Refresh, the application fetches window titles for all processes, which can take a moment. Subsequent refreshes use cached data and are faster.
+4. **First Refresh May Be Slow** (Windows 10 2004+ only): When you first click Refresh, the application fetches window titles for all processes, which can take a moment. Subsequent refreshes use cached data and are faster.
 
-5. **Audio Session Detection**: The "Show only processes with active audio" filter checks for active audio sessions, which requires querying Windows Audio Session API and may add a slight delay.
+5. **Audio Session Detection** (Windows 10 2004+ only): The "Show only processes with active audio" filter checks for active audio sessions, which requires querying Windows Audio Session API and may add a slight delay.
+
+6. **Pause/Resume Granularity**: Pause and resume work on all recordings at once, not individual recordings.
 
 ### Potential Improvements
 
 - Implement audio level meters and visualization
-- Add pause/resume functionality
+- Per-recording pause/resume (currently only all recordings at once)
 - Support for recording to multiple formats simultaneously
 - Audio processing filters (volume normalization, noise reduction, etc.)
 - Background worker thread for window title enumeration
 - VU meter display for active recordings
 - Lower latency passthrough options (experimental sub-50ms modes)
+- Volume control per recording
 
 ## Accessibility
 
@@ -323,8 +347,9 @@ The application uses standard Win32 controls for full accessibility:
 - Standard buttons with keyboard shortcuts (Tab/Enter navigation)
 - Proper tab order for all controls
 - ARIA-compliant labels for all UI elements
-- Screen reader compatible (tested with NVDA/JAWS)
-- Focus management (returns to process list after stopping capture)
+- Adaptive labels based on OS capabilities (prevents screen reader confusion on older Windows)
+- Screen reader compatible (tested with NVDA/JAWS on Windows 7 and Windows 10)
+- Smart focus management (adapts based on visible controls)
 
 ## Troubleshooting
 
@@ -344,9 +369,11 @@ The application uses standard Win32 controls for full accessibility:
 
 ### Application Crashes
 
-- Ensure you're running on Windows 10 or later
-- Check that Media Foundation is available (required for MP3)
+- The application should run on Windows 7 or later with no DLL errors
+- If you experience crashes on Windows 7, ensure you have the latest Windows updates installed
+- Check that Media Foundation is available (required for MP3 encoding)
 - Verify COM is properly initialized (automatic in this application)
+- Static runtime build eliminates MSVCP140.dll / VCRUNTIME140.dll dependency errors
 
 ## License
 

@@ -135,7 +135,7 @@ AudioCapture::AudioCapture()
     , m_isCapturing(false)
     , m_isPaused(false)
     , m_targetProcessId(0)
-    , m_volumeMultiplier(0.5f)  // Default to 50% volume
+    , m_volumeMultiplier(1.0f)  // Default to 100% volume
     , m_isProcessSpecific(false)
     , m_isInputDevice(false)
     , m_passthroughEnabled(false)

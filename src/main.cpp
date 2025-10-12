@@ -53,6 +53,14 @@ HWND g_hMicrophoneCheckbox;
 HWND g_hMicrophoneDeviceCombo;
 HWND g_hMicrophoneDeviceLabel;
 HWND g_hFormatLabel;
+HWND g_hProcessVolumeSlider;
+HWND g_hProcessVolumeLabel;
+HWND g_hMicrophoneVolumeSlider;
+HWND g_hMicrophoneVolumeLabel;
+
+// Volume settings (0-100%)
+float g_processVolume = 100.0f;  // Default to 100%
+float g_microphoneVolume = 100.0f;  // Default to 100%
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
@@ -161,7 +169,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     // Initialize common controls
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icex);
 
     // Register window class
@@ -391,6 +399,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             UpdateRecordingList();
         }
         return 0;
+
+    case WM_HSCROLL: {
+        // Handle slider changes
+        HWND hSlider = (HWND)lParam;
+
+        if (hSlider == g_hProcessVolumeSlider) {
+            int pos = (int)SendMessage(g_hProcessVolumeSlider, TBM_GETPOS, 0, 0);
+            g_processVolume = (float)pos;
+
+            wchar_t volumeText[64];
+            swprintf_s(volumeText, L"Process Volume: %d%%", pos);
+            SetWindowText(g_hProcessVolumeLabel, volumeText);
+        }
+        else if (hSlider == g_hMicrophoneVolumeSlider) {
+            int pos = (int)SendMessage(g_hMicrophoneVolumeSlider, TBM_GETPOS, 0, 0);
+            g_microphoneVolume = (float)pos;
+
+            wchar_t volumeText[64];
+            swprintf_s(volumeText, L"Microphone Volume: %d%%", pos);
+            SetWindowText(g_hMicrophoneVolumeLabel, volumeText);
+        }
+        return 0;
+    }
     }
 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -632,6 +663,44 @@ void InitializeControls(HWND hwnd) {
         540, 327, 230, 200,
         hwnd, (HMENU)IDC_MICROPHONE_DEVICE_COMBO, g_hInst, nullptr
     );
+
+    // Process volume label
+    g_hProcessVolumeLabel = CreateWindow(
+        L"STATIC", L"Process Volume: 100%",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        10, 298, 140, 20,
+        hwnd, (HMENU)IDC_PROCESS_VOLUME_LABEL, g_hInst, nullptr
+    );
+
+    // Process volume slider (0-100)
+    g_hProcessVolumeSlider = CreateWindowEx(
+        0, TRACKBAR_CLASS, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+        150, 298, 200, 20,
+        hwnd, (HMENU)IDC_PROCESS_VOLUME_SLIDER, g_hInst, nullptr
+    );
+    SendMessage(g_hProcessVolumeSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+    SendMessage(g_hProcessVolumeSlider, TBM_SETPOS, TRUE, 100);
+    SendMessage(g_hProcessVolumeSlider, TBM_SETTICFREQ, 10, 0);
+
+    // Microphone volume label (initially hidden)
+    g_hMicrophoneVolumeLabel = CreateWindow(
+        L"STATIC", L"Microphone Volume: 100%",
+        WS_CHILD | SS_LEFT,
+        360, 298, 150, 20,
+        hwnd, (HMENU)IDC_MICROPHONE_VOLUME_LABEL, g_hInst, nullptr
+    );
+
+    // Microphone volume slider (0-100, initially hidden)
+    g_hMicrophoneVolumeSlider = CreateWindowEx(
+        0, TRACKBAR_CLASS, L"",
+        WS_CHILD | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+        510, 298, 200, 20,
+        hwnd, (HMENU)IDC_MICROPHONE_VOLUME_SLIDER, g_hInst, nullptr
+    );
+    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETPOS, TRUE, 100);
+    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETTICFREQ, 10, 0);
 
     // Output path label
     g_hOutputPathLabel = CreateWindow(
@@ -1040,6 +1109,14 @@ void StartCapture() {
 
         // Start capture with bitrate, skip silence option, passthrough device, and monitor-only mode
         if (g_captureManager->StartCapture(processId, processName, fullPath, format, bitrate, skipSilence, passthroughDeviceId, captureMonitorOnly)) {
+            // Apply process volume setting (convert from 0-100 to 0.0-1.0)
+            auto sessions = g_captureManager->GetActiveSessions();
+            for (auto* session : sessions) {
+                if (session->processId == processId && session->capture) {
+                    session->capture->SetVolume(g_processVolume / 100.0f);
+                    break;
+                }
+            }
             startedCount++;
         }
     }
@@ -1136,6 +1213,14 @@ void StartCapture() {
                     bitrate,
                     skipSilence,
                     micMonitorOnly)) {
+                    // Apply microphone volume setting (convert from 0-100 to 0.0-1.0)
+                    auto sessions = g_captureManager->GetActiveSessions();
+                    for (auto* session : sessions) {
+                        if (session->processId == micProcessId && session->capture) {
+                            session->capture->SetVolume(g_microphoneVolume / 100.0f);
+                            break;
+                        }
+                    }
                     startedCount++;
                 }
             }
@@ -1460,6 +1545,30 @@ void LoadSettings() {
                     SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
                 }
             }
+
+            // Load process volume
+            if (settings.contains("processVolume") && settings["processVolume"].is_number()) {
+                float volume = settings["processVolume"];
+                if (volume >= 0.0f && volume <= 100.0f) {
+                    g_processVolume = volume;
+                    SendMessage(g_hProcessVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
+                    wchar_t volumeText[64];
+                    swprintf_s(volumeText, L"Process Volume: %d%%", (int)volume);
+                    SetWindowText(g_hProcessVolumeLabel, volumeText);
+                }
+            }
+
+            // Load microphone volume
+            if (settings.contains("microphoneVolume") && settings["microphoneVolume"].is_number()) {
+                float volume = settings["microphoneVolume"];
+                if (volume >= 0.0f && volume <= 100.0f) {
+                    g_microphoneVolume = volume;
+                    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
+                    wchar_t volumeText[64];
+                    swprintf_s(volumeText, L"Microphone Volume: %d%%", (int)volume);
+                    SetWindowText(g_hMicrophoneVolumeLabel, volumeText);
+                }
+            }
         }
         catch (...) {
             // If parsing fails, just use defaults
@@ -1529,6 +1638,10 @@ void SaveSettings() {
     // Save microphone device index
     int microphoneDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
     settings["microphoneDeviceIndex"] = microphoneDeviceIndex;
+
+    // Save volume settings
+    settings["processVolume"] = g_processVolume;
+    settings["microphoneVolume"] = g_microphoneVolume;
 
     // Write to file
     std::wstring settingsPath = GetSettingsFilePath();
@@ -1696,9 +1809,11 @@ void PopulateMicrophoneDevices() {
 }
 
 void OnMicrophoneCheckboxChanged() {
-    // Show/hide device selector based on checkbox state
+    // Show/hide device selector and volume controls based on checkbox state
     BOOL isChecked = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     ShowWindow(g_hMicrophoneDeviceLabel, isChecked ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hMicrophoneDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hMicrophoneVolumeLabel, isChecked ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hMicrophoneVolumeSlider, isChecked ? SW_SHOW : SW_HIDE);
 }
