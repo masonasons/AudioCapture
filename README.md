@@ -9,12 +9,20 @@ This was written with Claude Code. It has been tested and does function complete
 ## Features
 
 - **Per-Process Audio Capture**: Record audio from specific applications independently
+- **System-Wide Audio Capture**: Option to capture all system audio simultaneously
+- **Microphone Input Capture**: Record from microphone/line-in devices with seamless integration
+- **Multi-Process Recording Modes**:
+  - **Separate Files**: Each process records to its own file
+  - **Combined File**: All processes mixed into a single output file
+  - **Both**: Create individual files AND a combined mixed file
+- **Real-time Audio Mixing**: Combine multiple audio streams into a single file
+- **Audio Monitoring/Passthrough**: Send captured audio to another output device in real-time for monitoring
+- **Monitor-Only Mode**: Listen to audio without recording it to disk
 - **Multiple Format Support**: Save recordings as WAV, MP3, Opus, or FLAC files
   - **WAV**: Uncompressed PCM audio (highest quality, largest size)
   - **MP3**: Compressed with configurable bitrate (128-320 kbps)
   - **Opus**: Modern codec with configurable bitrate (64-256 kbps)
   - **FLAC**: Lossless compression with configurable levels (0-8)
-- **Multi-Process Recording**: Capture audio from multiple processes simultaneously using checkboxes
 - **Silence Detection**: Optional skip silence feature to save disk space
 - **Process Filtering**: Show only processes with active audio output
 - **Window Title Display**: See window titles to easily identify processes
@@ -124,13 +132,82 @@ The executable will be in `build\bin\AudioCapture.exe`
 6. **Monitor Progress**: View active recordings in the "Active Recordings" list
 7. **Stop Recording**: Select a recording and click "Stop Capture" (focus returns to process list)
 
-### Multiple Simultaneous Captures
+### System-Wide Audio Capture
 
-You can record multiple processes at once using checkboxes:
+To capture all system audio at once:
+1. **Select "[System Audio - All Processes]"**: This special entry at the top of the process list (PID 0) captures all system audio
+2. **Start Capture**: Records everything your system is playing
+3. Perfect for recording multiple applications together
+
+### Audio Monitoring (Passthrough to Output Device)
+
+You can send captured audio to another audio device in real-time:
+1. **Enable "Monitor audio"**: Check the checkbox to activate passthrough
+2. **Select Monitor Device**: Choose which output device to send audio to from the dropdown
+3. **Start Capture**: Audio will play through both the original device and your selected monitor device
+4. **Monitor-Only Mode**: Check "Monitor only - no recording" to listen without saving to disk
+   - Recording format and output path controls are disabled in this mode
+   - Useful for testing or temporary audio routing
+
+### Multiple Simultaneous Captures with Recording Modes
+
+You can record multiple processes at once with flexible output options:
+
+#### Recording Mode Selection
+Choose from the **Multi-process recording** dropdown:
+- **Separate files**: Each process records to its own individual file
+- **Combined file**: All processes are mixed into a single output file
+- **Both**: Creates individual files AND a combined mixed file
+
+#### Starting Multi-Process Capture
 1. **Check Multiple Processes**: Click the checkbox next to each process you want to record
-2. **Click "Start Capture"**: All checked processes will start recording simultaneously
-3. **Each process records to its own file** with a unique timestamp
-4. Stop individual recordings by selecting them in the "Active Recordings" list
+2. **Select Recording Mode**: Choose how you want the audio saved (Separate files / Combined file / Both)
+3. **Click "Start Capture"**: All checked processes will start recording simultaneously
+4. **Monitor Progress**: View all active recordings in the "Active Recordings" list
+5. **Stop Individual Recordings**: Select a recording and click "Stop Capture"
+6. **Stop All**: Click "Stop All" to end all active recordings at once
+
+#### Recording Mode Examples
+- **Separate files**: Recording Discord, Spotify, and Chrome creates three files:
+  - `Discord-2025_10_12-14_30_45.opus`
+  - `Spotify-2025_10_12-14_30_45.opus`
+  - `chrome-2025_10_12-14_30_45.opus`
+
+- **Combined file**: All three applications are mixed together into:
+  - `Combined-2025_10_12-14_30_45.opus`
+
+- **Both**: Creates all four files (three individual + one combined)
+
+### Microphone Input Capture
+
+You can capture microphone or line-in audio along with application audio:
+
+#### Setting Up Microphone Capture
+1. **Enable Microphone**: Check the "Capture microphone" checkbox
+2. **Select Device**: Choose your microphone from the dropdown that appears
+3. **Start Capture**: The microphone will be captured according to your recording mode
+
+#### Microphone with Recording Modes
+The microphone integrates seamlessly with multi-process recording modes:
+
+- **Separate files mode**: Microphone records to its own file
+  - Creates: `Microphone-2025_10_12-14_30_45.opus`
+  - Each application also gets its own file
+
+- **Combined file mode**: Microphone audio is mixed with application audio
+  - Microphone audio is included in: `Combined-2025_10_12-14_30_45.opus`
+  - No separate microphone file is created (appears as "Monitor Only" in the list)
+  - Perfect for recording commentary over gameplay or music
+
+- **Both mode**: Microphone creates its own file AND is included in the combined file
+  - Creates: `Microphone-2025_10_12-14_30_45.opus` (separate mic file)
+  - Microphone also mixed into: `Combined-2025_10_12-14_30_45.opus`
+  - Best for maximum flexibility
+
+#### Use Cases
+- **Gaming Commentary**: Capture game audio + microphone in one file (Combined mode)
+- **Music Recording**: Record DAW output + microphone vocals separately (Separate files mode)
+- **Podcast Recording**: Capture multiple apps + microphone with both individual tracks and mixed output (Both mode)
 
 ### Filtering Processes
 
@@ -150,10 +227,23 @@ For example: `chrome-2025_10_12-14_30_45.flac`
 
 ### Audio Capture Method
 
-This application uses WASAPI (Windows Audio Session API) in loopback mode to capture audio. The implementation:
-- Uses `IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK` for capture
-- Captures system-wide audio on Windows 10 (build < 20348)
-- Can be extended for true per-process capture on Windows 10 Build 20348+ using Audio Graph API
+This application uses WASAPI (Windows Audio Session API) to capture audio from multiple sources:
+
+#### Loopback Capture (Application Audio)
+- Uses `IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK` for capturing application output
+- Supports true per-process capture on Windows 10 Build 20348+ using `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`
+- Falls back to system-wide capture on older Windows versions (build < 20348)
+
+#### Input Device Capture (Microphone)
+- Uses `IAudioClient` with capture mode (eCapture data flow direction) for microphone input
+- Supports any WASAPI-compatible input device (microphones, line-in, etc.)
+- Automatically handles device enumeration and format negotiation
+
+#### Real-time Mixing
+- Multiple audio streams are mixed in real-time using a dedicated mixer thread
+- Automatic sample rate conversion and format matching
+- 32-bit float PCM mixing for maximum quality and dynamic range
+- Each stream can simultaneously record to its own file AND contribute to the mixed output
 
 ### Supported Audio Formats
 
@@ -191,9 +281,11 @@ This application uses WASAPI (Windows Audio Session API) in loopback mode to cap
 
 The application is structured into several components:
 
-- **AudioCapture**: WASAPI audio capture engine
+- **AudioCapture**: WASAPI audio capture engine with support for both loopback (application audio) and input device (microphone) capture, plus real-time passthrough
+- **AudioDeviceEnumerator**: Enumerates available audio output devices (for monitoring) and input devices (microphones/line-in)
+- **AudioMixer**: Real-time audio mixer that combines multiple audio streams with automatic resampling and format conversion
 - **ProcessEnumerator**: Enumerates running processes, window titles, and audio sessions
-- **CaptureManager**: Manages multiple simultaneous capture sessions with silence detection
+- **CaptureManager**: Manages multiple simultaneous capture sessions with silence detection and coordinated mixing
 - **WavWriter**: Writes uncompressed WAV files
 - **Mp3Encoder**: Encodes audio to MP3 using Media Foundation
 - **OpusEncoder**: Encodes audio to Opus in OGG container
@@ -205,7 +297,7 @@ The application is structured into several components:
 
 1. **System-Wide Capture**: On Windows versions prior to Build 20348, the application captures all system audio, not just the selected process. The selected process serves as a label for organization.
 
-2. **No Audio Preview**: The application doesn't provide real-time audio monitoring or visualization.
+2. **Audio Monitoring Latency**: Real-time audio passthrough operates with approximately 100ms latency. This is optimized for minimal delay while maintaining stability.
 
 3. **Elevated Processes**: Cannot capture audio from processes running with higher privileges unless the application also runs elevated.
 
@@ -221,6 +313,7 @@ The application is structured into several components:
 - Audio processing filters (volume normalization, noise reduction, etc.)
 - Background worker thread for window title enumeration
 - VU meter display for active recordings
+- Lower latency passthrough options (experimental sub-50ms modes)
 
 ## Accessibility
 

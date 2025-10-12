@@ -24,6 +24,7 @@ set(SOURCES
     src/FlacEncoder.cpp
     src/CaptureManager.cpp
     src/AudioDeviceEnumerator.cpp
+    src/AudioMixer.cpp
 )
 
 set(HEADERS
@@ -35,6 +36,7 @@ set(HEADERS
     include/FlacEncoder.h
     include/CaptureManager.h
     include/AudioDeviceEnumerator.h
+    include/AudioMixer.h
     include/resource.h
 )
 

@@ -136,6 +136,7 @@ AudioCapture::AudioCapture()
     , m_targetProcessId(0)
     , m_volumeMultiplier(0.5f)  // Default to 50% volume
     , m_isProcessSpecific(false)
+    , m_isInputDevice(false)
     , m_passthroughEnabled(false)
     , m_renderDevice(nullptr)
     , m_renderClient(nullptr)
@@ -414,6 +415,91 @@ bool AudioCapture::InitializeSystemWideCapture() {
     hr = m_audioClient->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK,
+        hnsRequestedDuration,
+        0,
+        m_waveFormat,
+        nullptr);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Get capture client
+    hr = m_audioClient->GetService(__uuidof(IAudioCaptureClient),
+        (void**)&m_captureClient);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInputDevice) {
+    m_isInputDevice = isInputDevice;
+    m_isProcessSpecific = false;
+
+    // Clean up any existing state from previous initialization
+    if (m_captureClient) {
+        m_captureClient->Release();
+        m_captureClient = nullptr;
+    }
+    if (m_audioClient) {
+        m_audioClient->Release();
+        m_audioClient = nullptr;
+    }
+    if (m_waveFormat) {
+        CoTaskMemFree(m_waveFormat);
+        m_waveFormat = nullptr;
+    }
+    if (m_device) {
+        m_device->Release();
+        m_device = nullptr;
+    }
+    if (m_deviceEnumerator) {
+        m_deviceEnumerator->Release();
+        m_deviceEnumerator = nullptr;
+    }
+
+    // Create device enumerator
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+        CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+        (void**)&m_deviceEnumerator);
+
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Get the specified device by ID
+    hr = m_deviceEnumerator->GetDevice(deviceId.c_str(), &m_device);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Activate audio client
+    hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+        nullptr, (void**)&m_audioClient);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Get mix format
+    hr = m_audioClient->GetMixFormat(&m_waveFormat);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Initialize audio client
+    const REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second
+    DWORD streamFlags = 0;
+
+    // For input devices (microphones), don't use loopback mode
+    // For output devices, use loopback mode to capture what's playing
+    if (!isInputDevice) {
+        streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+    }
+
+    hr = m_audioClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        streamFlags,
         hnsRequestedDuration,
         0,
         m_waveFormat,

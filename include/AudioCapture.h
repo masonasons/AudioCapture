@@ -24,6 +24,9 @@ public:
     // Initialize capture for a specific process (0 for system-wide)
     bool Initialize(DWORD processId);
 
+    // Initialize capture from a specific device (for microphone/line-in)
+    bool InitializeFromDevice(const std::wstring& deviceId, bool isInputDevice);
+
     // Start capturing audio
     bool Start();
 
@@ -68,6 +71,7 @@ private:
     DWORD m_targetProcessId;
     float m_volumeMultiplier;
     bool m_isProcessSpecific;
+    bool m_isInputDevice;  // True if capturing from input device (mic), false if loopback
 
     // Passthrough/monitor members
     bool m_passthroughEnabled;
