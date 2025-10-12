@@ -23,6 +23,7 @@ set(SOURCES
     src/OpusEncoder.cpp
     src/FlacEncoder.cpp
     src/CaptureManager.cpp
+    src/AudioDeviceEnumerator.cpp
 )
 
 set(HEADERS
@@ -33,6 +34,7 @@ set(HEADERS
     include/OpusEncoder.h
     include/FlacEncoder.h
     include/CaptureManager.h
+    include/AudioDeviceEnumerator.h
     include/resource.h
 )
 

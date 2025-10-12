@@ -8,6 +8,7 @@
 #include <mmreg.h>
 #include <ks.h>
 #include <ksmedia.h>
+#include <algorithm>
 
 //=============================================================================
 // AudioClientActivationHandler Implementation
@@ -135,12 +136,18 @@ AudioCapture::AudioCapture()
     , m_targetProcessId(0)
     , m_volumeMultiplier(0.5f)  // Default to 50% volume
     , m_isProcessSpecific(false)
+    , m_passthroughEnabled(false)
+    , m_renderDevice(nullptr)
+    , m_renderClient(nullptr)
+    , m_audioRenderClient(nullptr)
+    , m_renderBufferFrameCount(0)
 {
     // COM should already be initialized by the main thread
 }
 
 AudioCapture::~AudioCapture() {
     Stop();
+    DisablePassthrough();
 
     if (m_waveFormat) {
         CoTaskMemFree(m_waveFormat);
@@ -557,6 +564,33 @@ void AudioCapture::CaptureThread() {
                     std::vector<BYTE> buffer(data, data + bufferSize);
                     ApplyVolumeToBuffer(buffer.data(), bufferSize);
                     m_dataCallback(buffer.data(), bufferSize);
+
+                    // If passthrough is enabled, also send to render device
+                    if (m_passthroughEnabled && m_audioRenderClient && m_renderClient) {
+                        // Get padding (how much is already in the buffer)
+                        UINT32 numFramesPadding = 0;
+                        if (SUCCEEDED(m_renderClient->GetCurrentPadding(&numFramesPadding))) {
+                            // Calculate how many frames we can write
+                            UINT32 renderFramesAvailable = m_renderBufferFrameCount - numFramesPadding;
+
+                            // Calculate how many frames we have from capture
+                            UINT32 captureFrames = numFramesAvailable;
+
+                            // Only write as many frames as we have available, and don't exceed buffer space
+                            UINT32 framesToWrite = std::min(renderFramesAvailable, captureFrames);
+
+                            if (framesToWrite > 0) {
+                                BYTE* renderBuffer = nullptr;
+                                if (SUCCEEDED(m_audioRenderClient->GetBuffer(framesToWrite, &renderBuffer))) {
+                                    // Copy audio data to render buffer
+                                    UINT32 bytesToCopy = framesToWrite * m_waveFormat->nBlockAlign;
+                                    memcpy(renderBuffer, buffer.data(), bytesToCopy);
+
+                                    m_audioRenderClient->ReleaseBuffer(framesToWrite, 0);
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -580,4 +614,122 @@ void AudioCapture::CaptureThread() {
     if (hTask) {
         AvRevertMmThreadCharacteristics(hTask);
     }
+}
+
+bool AudioCapture::EnablePassthrough(const std::wstring& deviceId) {
+    // Disable any existing passthrough
+    DisablePassthrough();
+
+    if (!m_waveFormat || !m_deviceEnumerator) {
+        return false;
+    }
+
+    // Get the render device
+    HRESULT hr = m_deviceEnumerator->GetDevice(deviceId.c_str(), &m_renderDevice);
+    if (FAILED(hr) || !m_renderDevice) {
+        return false;
+    }
+
+    // Activate audio client for rendering
+    hr = m_renderDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+        nullptr, (void**)&m_renderClient);
+    if (FAILED(hr)) {
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+        return false;
+    }
+
+    // Initialize the render client with the same format as capture
+    // Use smaller buffer for lower latency (100ms instead of 1 second)
+    const REFERENCE_TIME hnsRequestedDuration = 1000000; // 100ms
+    hr = m_renderClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        0,
+        hnsRequestedDuration,
+        0,
+        m_waveFormat,
+        nullptr);
+
+    if (FAILED(hr)) {
+        m_renderClient->Release();
+        m_renderClient = nullptr;
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+        return false;
+    }
+
+    // Get buffer size
+    hr = m_renderClient->GetBufferSize(&m_renderBufferFrameCount);
+    if (FAILED(hr)) {
+        m_renderClient->Release();
+        m_renderClient = nullptr;
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+        return false;
+    }
+
+    // Get render client service
+    hr = m_renderClient->GetService(__uuidof(IAudioRenderClient),
+        (void**)&m_audioRenderClient);
+
+    if (FAILED(hr) || !m_audioRenderClient) {
+        m_renderClient->Release();
+        m_renderClient = nullptr;
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+        return false;
+    }
+
+    // Pre-fill half the buffer with silence to reduce latency while avoiding underruns
+    UINT32 prefillFrames = m_renderBufferFrameCount / 2;
+    BYTE* renderBuffer = nullptr;
+    hr = m_audioRenderClient->GetBuffer(prefillFrames, &renderBuffer);
+    if (SUCCEEDED(hr) && renderBuffer) {
+        // Fill with silence
+        memset(renderBuffer, 0, prefillFrames * m_waveFormat->nBlockAlign);
+        m_audioRenderClient->ReleaseBuffer(prefillFrames, 0);
+    }
+
+    // Start the render client
+    hr = m_renderClient->Start();
+    if (FAILED(hr)) {
+        m_audioRenderClient->Release();
+        m_audioRenderClient = nullptr;
+        m_renderClient->Release();
+        m_renderClient = nullptr;
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+        return false;
+    }
+
+    m_passthroughEnabled = true;
+    return true;
+}
+
+void AudioCapture::DisablePassthrough() {
+    if (!m_passthroughEnabled) {
+        return;
+    }
+
+    if (m_renderClient) {
+        m_renderClient->Stop();
+    }
+
+    if (m_audioRenderClient) {
+        m_audioRenderClient->Release();
+        m_audioRenderClient = nullptr;
+    }
+
+    if (m_renderClient) {
+        m_renderClient->Release();
+        m_renderClient = nullptr;
+    }
+
+    if (m_renderDevice) {
+        m_renderDevice->Release();
+        m_renderDevice = nullptr;
+    }
+
+    m_renderBufferFrameCount = 0;
+    m_passthroughEnabled = false;
 }

@@ -10,6 +10,7 @@
 #include "resource.h"
 #include "ProcessEnumerator.h"
 #include "CaptureManager.h"
+#include "AudioDeviceEnumerator.h"
 
 using json = nlohmann::json;
 
@@ -39,9 +40,14 @@ HWND g_hSkipSilenceCheckbox;
 HWND g_hFlacCompressionCombo;
 HWND g_hFlacCompressionLabel;
 HWND g_hShowAudioOnlyCheckbox;
+HWND g_hPassthroughCheckbox;
+HWND g_hPassthroughDeviceCombo;
+HWND g_hPassthroughDeviceLabel;
+HWND g_hMonitorOnlyCheckbox;
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
+std::unique_ptr<AudioDeviceEnumerator> g_audioDeviceEnum;
 std::vector<ProcessInfo> g_processes;
 
 // Window class name
@@ -63,6 +69,9 @@ void SaveSettings();
 std::wstring GetSettingsFilePath();
 std::string WStringToString(const std::wstring& wstr);
 std::wstring StringToWString(const std::string& str);
+void PopulatePassthroughDevices();
+void OnPassthroughCheckboxChanged();
+void OnMonitorOnlyCheckboxChanged();
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_hInst = hInstance;
@@ -115,6 +124,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     // Initialize global objects
     g_processEnum = std::make_unique<ProcessEnumerator>();
     g_captureManager = std::make_unique<CaptureManager>();
+    g_audioDeviceEnum = std::make_unique<AudioDeviceEnumerator>();
 
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
@@ -144,6 +154,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         SetFocus(g_hProcessList);
         // Start timer for updating recording list (every 500ms)
         SetTimer(hwnd, 1, 500, nullptr);
+        // Populate devices after window is fully created
+        PostMessage(hwnd, WM_USER + 1, 0, 0);
+        return 0;
+
+    case WM_USER + 1:
+        // Called after window is fully created
+        PopulatePassthroughDevices();
         return 0;
 
     case WM_COMMAND: {
@@ -176,6 +193,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case IDC_SHOW_AUDIO_ONLY_CHECKBOX:
             if (wmEvent == BN_CLICKED) {
                 RefreshProcessList();
+            }
+            break;
+
+        case IDC_PASSTHROUGH_CHECKBOX:
+            if (wmEvent == BN_CLICKED) {
+                OnPassthroughCheckboxChanged();
+            }
+            break;
+
+        case IDC_MONITOR_ONLY_CHECKBOX:
+            if (wmEvent == BN_CLICKED) {
+                OnMonitorOnlyCheckboxChanged();
             }
             break;
         }
@@ -373,6 +402,38 @@ void InitializeControls(HWND hwnd) {
         hwnd, (HMENU)IDC_SKIP_SILENCE_CHECKBOX, g_hInst, nullptr
     );
 
+    // Passthrough checkbox
+    g_hPassthroughCheckbox = CreateWindow(
+        L"BUTTON", L"Monitor audio",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        420, 247, 120, 20,
+        hwnd, (HMENU)IDC_PASSTHROUGH_CHECKBOX, g_hInst, nullptr
+    );
+
+    // Passthrough device label
+    g_hPassthroughDeviceLabel = CreateWindow(
+        L"STATIC", L"Monitor Device:",
+        WS_CHILD | SS_LEFT,
+        550, 248, 100, 20,
+        hwnd, (HMENU)IDC_PASSTHROUGH_DEVICE_LABEL, g_hInst, nullptr
+    );
+
+    // Passthrough device combo box
+    g_hPassthroughDeviceCombo = CreateWindow(
+        WC_COMBOBOX, L"",
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+        650, 245, 140, 200,
+        hwnd, (HMENU)IDC_PASSTHROUGH_DEVICE_COMBO, g_hInst, nullptr
+    );
+
+    // Monitor only checkbox
+    g_hMonitorOnlyCheckbox = CreateWindow(
+        L"BUTTON", L"Monitor only (no recording)",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        420, 270, 200, 20,
+        hwnd, (HMENU)IDC_MONITOR_ONLY_CHECKBOX, g_hInst, nullptr
+    );
+
     // Output path label
     g_hOutputPathLabel = CreateWindow(
         L"STATIC", L"Output Folder:",
@@ -484,6 +545,30 @@ void RefreshProcessList() {
     bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     int displayedCount = 0;
+
+    // Always add system-wide audio option as first item (unless filtering by active audio)
+    if (!showAudioOnly) {
+        LVITEM lvi = {};
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = 0;
+        lvi.pszText = (LPWSTR)L"[System Audio - All Processes]";
+        int index = ListView_InsertItem(g_hProcessList, &lvi);
+
+        ListView_SetItemText(g_hProcessList, index, 1, (LPWSTR)L"0");
+        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)L"Capture all system audio");
+        ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)L"System-wide loopback");
+
+        // Check if system audio was previously checked (PID 0)
+        for (DWORD checkedPID : checkedPIDs) {
+            if (checkedPID == 0) {
+                ListView_SetCheckState(g_hProcessList, index, TRUE);
+                break;
+            }
+        }
+
+        displayedCount++;
+    }
+
     for (size_t i = 0; i < g_processes.size(); i++) {
         ProcessInfo& proc = g_processes[i];
 
@@ -615,14 +700,38 @@ void StartCapture() {
     // Get skip silence option
     bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
+    // Get passthrough option and device ID
+    bool enablePassthrough = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    std::wstring passthroughDeviceId;
+    if (enablePassthrough && g_audioDeviceEnum) {
+        int deviceIndex = (int)SendMessage(g_hPassthroughDeviceCombo, CB_GETCURSEL, 0, 0);
+        if (deviceIndex >= 0) {
+            const auto& devices = g_audioDeviceEnum->GetDevices();
+            if (deviceIndex < static_cast<int>(devices.size())) {
+                passthroughDeviceId = devices[deviceIndex].deviceId;
+            }
+        }
+    }
+
+    // Get monitor-only option
+    bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
     int startedCount = 0;
     int alreadyCapturingCount = 0;
 
     for (int checkedIndex : checkedIndices) {
-        const ProcessInfo& proc = g_processes[checkedIndex];
+        // Get process info from ListView (not from g_processes, because system audio isn't in that vector)
+        wchar_t processNameBuf[256];
+        wchar_t pidStrBuf[32];
+
+        ListView_GetItemText(g_hProcessList, checkedIndex, 0, processNameBuf, 256);
+        ListView_GetItemText(g_hProcessList, checkedIndex, 1, pidStrBuf, 32);
+
+        std::wstring processName = processNameBuf;
+        DWORD processId = (DWORD)_wtoi(pidStrBuf);
 
         // Check if already capturing
-        if (g_captureManager->IsCapturing(proc.processId)) {
+        if (g_captureManager->IsCapturing(processId)) {
             alreadyCapturingCount++;
             continue;
         }
@@ -642,7 +751,7 @@ void StartCapture() {
             st.wHour, st.wMinute, st.wSecond);
 
         // Remove .exe extension from process name if present
-        std::wstring cleanProcessName = proc.processName;
+        std::wstring cleanProcessName = processName;
         size_t exePos = cleanProcessName.find(L".exe");
         if (exePos != std::wstring::npos) {
             cleanProcessName = cleanProcessName.substr(0, exePos);
@@ -650,8 +759,8 @@ void StartCapture() {
 
         fullPath += cleanProcessName + L"-" + timestamp + extension;
 
-        // Start capture with bitrate and skip silence option
-        if (g_captureManager->StartCapture(proc.processId, proc.processName, fullPath, format, bitrate, skipSilence)) {
+        // Start capture with bitrate, skip silence option, passthrough device, and monitor-only mode
+        if (g_captureManager->StartCapture(processId, processName, fullPath, format, bitrate, skipSilence, passthroughDeviceId, monitorOnly)) {
             startedCount++;
         }
     }
@@ -732,14 +841,22 @@ void UpdateRecordingList() {
         ListView_SetItemText(g_hRecordingList, index, 1, pidStr);
 
         // Output file (third column)
-        ListView_SetItemText(g_hRecordingList, index, 2, (LPWSTR)session->outputFile.c_str());
+        if (session->monitorOnly) {
+            ListView_SetItemText(g_hRecordingList, index, 2, (LPWSTR)L"[Monitor Only - No Recording]");
+        } else {
+            ListView_SetItemText(g_hRecordingList, index, 2, (LPWSTR)session->outputFile.c_str());
+        }
 
         // Data written (fourth column)
-        std::wstring sizeStr = FormatFileSize(session->bytesWritten);
-        ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)sizeStr.c_str());
+        if (session->monitorOnly) {
+            ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)L"N/A");
+        } else {
+            std::wstring sizeStr = FormatFileSize(session->bytesWritten);
+            ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)sizeStr.c_str());
+        }
 
         // Check if this was the previously selected item
-        if (selectedPID != 0 && session->processId == selectedPID) {
+        if (selectedIndex >= 0 && session->processId == selectedPID) {
             newSelectedIndex = index;
         }
     }
@@ -883,6 +1000,27 @@ void LoadSettings() {
                 bool skipSilence = settings["skipSilence"];
                 SendMessage(g_hSkipSilenceCheckbox, BM_SETCHECK, skipSilence ? BST_CHECKED : BST_UNCHECKED, 0);
             }
+
+            // Load passthrough (monitor audio) option
+            if (settings.contains("passthrough") && settings["passthrough"].is_boolean()) {
+                bool passthrough = settings["passthrough"];
+                SendMessage(g_hPassthroughCheckbox, BM_SETCHECK, passthrough ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
+
+            // Load passthrough device index
+            if (settings.contains("passthroughDeviceIndex") && settings["passthroughDeviceIndex"].is_number_integer()) {
+                int deviceIndex = settings["passthroughDeviceIndex"];
+                // Will be applied after device enumeration completes
+                if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hPassthroughDeviceCombo, CB_GETCOUNT, 0, 0)) {
+                    SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
+                }
+            }
+
+            // Load monitor only option
+            if (settings.contains("monitorOnly") && settings["monitorOnly"].is_boolean()) {
+                bool monitorOnly = settings["monitorOnly"];
+                SendMessage(g_hMonitorOnlyCheckbox, BM_SETCHECK, monitorOnly ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
         }
         catch (...) {
             // If parsing fails, just use defaults
@@ -892,6 +1030,12 @@ void LoadSettings() {
 
     // Update visibility of bitrate controls based on selected format
     OnFormatChanged();
+
+    // Update visibility of passthrough controls
+    OnPassthroughCheckboxChanged();
+
+    // Update state of recording controls based on monitor-only
+    OnMonitorOnlyCheckboxChanged();
 }
 
 void SaveSettings() {
@@ -919,6 +1063,18 @@ void SaveSettings() {
     // Save skip silence option
     bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     settings["skipSilence"] = skipSilence;
+
+    // Save passthrough (monitor audio) option
+    bool passthrough = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["passthrough"] = passthrough;
+
+    // Save passthrough device index
+    int passthroughDeviceIndex = (int)SendMessage(g_hPassthroughDeviceCombo, CB_GETCURSEL, 0, 0);
+    settings["passthroughDeviceIndex"] = passthroughDeviceIndex;
+
+    // Save monitor only option
+    bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["monitorOnly"] = monitorOnly;
 
     // Write to file
     std::wstring settingsPath = GetSettingsFilePath();
@@ -955,4 +1111,76 @@ void OnFormatChanged() {
         ShowWindow(g_hFlacCompressionCombo, SW_SHOW);
         break;
     }
+}
+
+void PopulatePassthroughDevices() {
+    if (!g_audioDeviceEnum) {
+        return;
+    }
+
+    // Enumerate audio devices
+    if (!g_audioDeviceEnum->EnumerateDevices()) {
+        return;
+    }
+
+    // Clear existing items
+    SendMessage(g_hPassthroughDeviceCombo, CB_RESETCONTENT, 0, 0);
+
+    // Add devices to combo box
+    const auto& devices = g_audioDeviceEnum->GetDevices();
+    int defaultIndex = -1;
+
+    for (size_t i = 0; i < devices.size(); i++) {
+        const AudioDeviceInfo& device = devices[i];
+
+        // Format name with (Default) suffix if it's the default device
+        std::wstring displayName = device.friendlyName;
+        if (device.isDefault) {
+            displayName += L" (Default)";
+            defaultIndex = static_cast<int>(i);
+        }
+
+        SendMessage(g_hPassthroughDeviceCombo, CB_ADDSTRING, 0, (LPARAM)displayName.c_str());
+        // Store device index as item data
+        SendMessage(g_hPassthroughDeviceCombo, CB_SETITEMDATA, i, (LPARAM)i);
+    }
+
+    // Select default device
+    if (defaultIndex >= 0) {
+        SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, defaultIndex, 0);
+    } else if (devices.size() > 0) {
+        SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, 0, 0);
+    }
+
+    // Initially hide passthrough controls
+    OnPassthroughCheckboxChanged();
+}
+
+void OnPassthroughCheckboxChanged() {
+    // Show/hide device selector based on checkbox state
+    BOOL isChecked = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    ShowWindow(g_hPassthroughDeviceLabel, isChecked ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hPassthroughDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
+}
+
+void OnMonitorOnlyCheckboxChanged() {
+    // Enable/disable recording-specific controls based on monitor-only state
+    BOOL isMonitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    BOOL enableRecordingControls = !isMonitorOnly;
+
+    // Disable format selection
+    EnableWindow(g_hFormatCombo, enableRecordingControls);
+
+    // Disable bitrate/compression controls
+    EnableWindow(g_hMp3BitrateCombo, enableRecordingControls);
+    EnableWindow(g_hOpusBitrateCombo, enableRecordingControls);
+    EnableWindow(g_hFlacCompressionCombo, enableRecordingControls);
+
+    // Disable output path controls
+    EnableWindow(g_hOutputPath, enableRecordingControls);
+    EnableWindow(g_hBrowseBtn, enableRecordingControls);
+
+    // Disable skip silence option (only relevant for recording)
+    EnableWindow(g_hSkipSilenceCheckbox, enableRecordingControls);
 }

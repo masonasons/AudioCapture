@@ -10,7 +10,9 @@ CaptureManager::~CaptureManager() {
 
 bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processName,
                                   const std::wstring& outputPath, AudioFormat format,
-                                  UINT32 bitrate, bool skipSilence) {
+                                  UINT32 bitrate, bool skipSilence,
+                                  const std::wstring& passthroughDeviceId,
+                                  bool monitorOnly) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Check if already capturing this process
@@ -27,6 +29,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
     session->isActive = false;
     session->bytesWritten = 0;
     session->skipSilence = skipSilence;
+    session->monitorOnly = monitorOnly;
 
     // Create audio capture
     session->capture = std::make_unique<AudioCapture>();
@@ -34,40 +37,50 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
         return false;
     }
 
-    // Create appropriate encoder
-    const WAVEFORMATEX* waveFormat = session->capture->GetFormat();
-    bool encoderReady = false;
-
-    switch (format) {
-    case AudioFormat::WAV:
-        session->wavWriter = std::make_unique<WavWriter>();
-        encoderReady = session->wavWriter->Open(outputPath, waveFormat);
-        break;
-
-    case AudioFormat::MP3:
-        session->mp3Encoder = std::make_unique<Mp3Encoder>();
-        // Use provided bitrate or default to 192000 (192 kbps)
-        encoderReady = session->mp3Encoder->Open(outputPath, waveFormat,
-                                                  bitrate > 0 ? bitrate : 192000);
-        break;
-
-    case AudioFormat::OPUS:
-        session->opusEncoder = std::make_unique<OpusEncoder>();
-        // Use provided bitrate or default to 128000 (128 kbps)
-        encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
-                                                   bitrate > 0 ? bitrate : 128000);
-        break;
-
-    case AudioFormat::FLAC:
-        session->flacEncoder = std::make_unique<FlacEncoder>();
-        // Use bitrate as compression level (0-8), default to 5
-        encoderReady = session->flacEncoder->Open(outputPath, waveFormat,
-                                                   bitrate > 0 ? std::min(bitrate, 8u) : 5);
-        break;
+    // Enable passthrough if device ID is provided
+    if (!passthroughDeviceId.empty()) {
+        if (!session->capture->EnablePassthrough(passthroughDeviceId)) {
+            // Passthrough failed, but we can still continue with recording only
+            // Could add a warning here if needed
+        }
     }
 
-    if (!encoderReady) {
-        return false;
+    // Create appropriate encoder (skip if monitor-only mode)
+    const WAVEFORMATEX* waveFormat = session->capture->GetFormat();
+    bool encoderReady = monitorOnly; // If monitor-only, skip encoder setup
+
+    if (!monitorOnly) {
+        switch (format) {
+        case AudioFormat::WAV:
+            session->wavWriter = std::make_unique<WavWriter>();
+            encoderReady = session->wavWriter->Open(outputPath, waveFormat);
+            break;
+
+        case AudioFormat::MP3:
+            session->mp3Encoder = std::make_unique<Mp3Encoder>();
+            // Use provided bitrate or default to 192000 (192 kbps)
+            encoderReady = session->mp3Encoder->Open(outputPath, waveFormat,
+                                                      bitrate > 0 ? bitrate : 192000);
+            break;
+
+        case AudioFormat::OPUS:
+            session->opusEncoder = std::make_unique<OpusEncoder>();
+            // Use provided bitrate or default to 128000 (128 kbps)
+            encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
+                                                       bitrate > 0 ? bitrate : 128000);
+            break;
+
+        case AudioFormat::FLAC:
+            session->flacEncoder = std::make_unique<FlacEncoder>();
+            // Use bitrate as compression level (0-8), default to 5
+            encoderReady = session->flacEncoder->Open(outputPath, waveFormat,
+                                                       bitrate > 0 ? std::min(bitrate, 8u) : 5);
+            break;
+        }
+
+        if (!encoderReady) {
+            return false;
+        }
     }
 
     // Set audio data callback
@@ -209,35 +222,37 @@ void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size)
         }
     }
 
-    // Write data to appropriate encoder
-    bool success = false;
-    switch (session->format) {
-    case AudioFormat::WAV:
-        if (session->wavWriter) {
-            success = session->wavWriter->WriteData(data, size);
-        }
-        break;
+    // Write data to appropriate encoder (skip if monitor-only mode)
+    if (!session->monitorOnly) {
+        bool success = false;
+        switch (session->format) {
+        case AudioFormat::WAV:
+            if (session->wavWriter) {
+                success = session->wavWriter->WriteData(data, size);
+            }
+            break;
 
-    case AudioFormat::MP3:
-        if (session->mp3Encoder) {
-            success = session->mp3Encoder->WriteData(data, size);
-        }
-        break;
+        case AudioFormat::MP3:
+            if (session->mp3Encoder) {
+                success = session->mp3Encoder->WriteData(data, size);
+            }
+            break;
 
-    case AudioFormat::OPUS:
-        if (session->opusEncoder) {
-            success = session->opusEncoder->WriteData(data, size);
-        }
-        break;
+        case AudioFormat::OPUS:
+            if (session->opusEncoder) {
+                success = session->opusEncoder->WriteData(data, size);
+            }
+            break;
 
-    case AudioFormat::FLAC:
-        if (session->flacEncoder) {
-            success = session->flacEncoder->WriteData(data, size);
+        case AudioFormat::FLAC:
+            if (session->flacEncoder) {
+                success = session->flacEncoder->WriteData(data, size);
+            }
+            break;
         }
-        break;
-    }
 
-    if (success) {
-        session->bytesWritten += size;
+        if (success) {
+            session->bytesWritten += size;
+        }
     }
 }

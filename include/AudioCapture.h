@@ -8,6 +8,7 @@
 #include <atomic>
 #include <functional>
 #include <vector>
+#include <string>
 
 // For process-specific audio capture (Windows 10 Build 20348+)
 #include <audioclientactivationparams.h>
@@ -43,6 +44,11 @@ public:
     // Set volume multiplier (0.0 to 1.0)
     void SetVolume(float volume) { m_volumeMultiplier = volume; }
 
+    // Enable/disable audio passthrough to a render device
+    bool EnablePassthrough(const std::wstring& deviceId);
+    void DisablePassthrough();
+    bool IsPassthroughEnabled() const { return m_passthroughEnabled; }
+
 private:
     void CaptureThread();
     bool InitializeProcessSpecificCapture(DWORD processId);
@@ -62,6 +68,13 @@ private:
     DWORD m_targetProcessId;
     float m_volumeMultiplier;
     bool m_isProcessSpecific;
+
+    // Passthrough/monitor members
+    bool m_passthroughEnabled;
+    IMMDevice* m_renderDevice;
+    IAudioClient* m_renderClient;
+    IAudioRenderClient* m_audioRenderClient;
+    UINT32 m_renderBufferFrameCount;
 };
 
 // COM completion handler for async audio interface activation

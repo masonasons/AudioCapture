@@ -29,6 +29,7 @@ struct CaptureSession {
     bool isActive;
     UINT64 bytesWritten;
     bool skipSilence;
+    bool monitorOnly;
 };
 
 class CaptureManager {
@@ -39,7 +40,9 @@ public:
     // Start capturing from a process
     bool StartCapture(DWORD processId, const std::wstring& processName,
                      const std::wstring& outputPath, AudioFormat format,
-                     UINT32 bitrate = 0, bool skipSilence = false);
+                     UINT32 bitrate = 0, bool skipSilence = false,
+                     const std::wstring& passthroughDeviceId = L"",
+                     bool monitorOnly = false);
 
     // Stop capturing from a specific process
     bool StopCapture(DWORD processId);
