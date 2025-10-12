@@ -24,6 +24,8 @@ jobs:
         shell: cmd
         run: |
           echo | build.bat
+        env:
+          VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
 
       - name: Package release
         shell: pwsh
