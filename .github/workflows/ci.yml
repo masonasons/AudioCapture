@@ -15,17 +15,19 @@ jobs:
         with:
           fetch-depth: 0  # Fetch all history for release notes
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgJsonGlob: 'vcpkg.json'
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          cd C:\vcpkg
+          .\vcpkg install opus:x64-windows-static-mt libflac:x64-windows-static-mt libogg:x64-windows-static-mt nlohmann-json:x64-windows-static-mt --overlay-triplets=${{ github.workspace }}\triplets
 
       - name: Build with build.bat
         shell: cmd
         run: |
           echo | build.bat
         env:
-          VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/triplets
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}\triplets
 
       - name: Package release
         shell: pwsh
