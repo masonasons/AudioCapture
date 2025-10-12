@@ -8,6 +8,6 @@
     "libflac",
     "nlohmann-json"
   ],
-  "builtin-baseline": "c8696863d371ab7f46545de4e661c3f42d5d2e9b",
+  "builtin-baseline": "a42af01b72c28a8e1d7b48107b33e4f286a55ef6",
   "overrides": []
 }
