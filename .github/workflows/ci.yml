@@ -38,8 +38,12 @@ jobs:
       - name: Delete existing latest release and tag
         shell: pwsh
         run: |
-          # Try to delete the existing release
-          gh release delete latest --yes --cleanup-tag 2>$null || echo "No existing 'latest' release found"
+          # Try to delete the existing release - ignore error if it doesn't exist
+          gh release delete latest --yes --cleanup-tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "No existing 'latest' release found (this is OK)"
+            exit 0
+          }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
