@@ -801,12 +801,21 @@ void StartCapture() {
     // Get monitor-only option
     bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    // Get recording mode (only relevant if multiple processes selected and not monitor-only)
+    // Check if microphone is enabled (counts as an additional source)
+    bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    // Calculate total number of audio sources (processes + microphone)
+    size_t totalSources = checkedIndices.size();
+    if (captureMicrophone && !monitorOnly) {
+        totalSources++; // Microphone counts as an additional source
+    }
+
+    // Get recording mode (only relevant if multiple sources and not monitor-only)
     int recordingModeIndex = (int)SendMessage(g_hRecordingModeCombo, CB_GETCURSEL, 0, 0);
     // 0 = Separate files, 1 = Combined file, 2 = Both
 
-    bool createSeparateFiles = (checkedIndices.size() == 1) || (recordingModeIndex == 0) || (recordingModeIndex == 2);
-    bool createCombinedFile = (checkedIndices.size() > 1) && !monitorOnly && ((recordingModeIndex == 1) || (recordingModeIndex == 2));
+    bool createSeparateFiles = (totalSources == 1) || (recordingModeIndex == 0) || (recordingModeIndex == 2);
+    bool createCombinedFile = (totalSources > 1) && !monitorOnly && ((recordingModeIndex == 1) || (recordingModeIndex == 2));
 
     int startedCount = 0;
     int alreadyCapturingCount = 0;
@@ -893,7 +902,6 @@ void StartCapture() {
     }
 
     // Handle microphone capture if enabled (and not in monitor-only mode)
-    bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (captureMicrophone && !monitorOnly && g_audioDeviceEnum) {
         // Get microphone device ID
         int micDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
