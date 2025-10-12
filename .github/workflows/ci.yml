@@ -1,0 +1,74 @@
+name: Build and Release Latest
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-release:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for release notes
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: 'vcpkg.json'
+
+      - name: Build with build.bat
+        shell: cmd
+        run: |
+          echo | build.bat
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          $zipName = "AudioCapture-latest-windows-x64.zip"
+          Compress-Archive -Path "package/*" -DestinationPath $zipName
+
+      - name: Delete existing latest release and tag
+        shell: pwsh
+        run: |
+          # Try to delete the existing release
+          gh release delete latest --yes --cleanup-tag 2>$null || echo "No existing 'latest' release found"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create latest tag
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            ## Latest Automatic Build
+
+            This is an automatically generated release from the latest commit on the master branch.
+
+            **Commit**: ${{ github.sha }}
+            **Build Date**: ${{ github.event.head_commit.timestamp }}
+
+            ### Recent Changes
+            ${{ github.event.head_commit.message }}
+
+            ---
+
+            For versioned releases, see the [Releases page](https://github.com/${{ github.repository }}/releases).
+          files: AudioCapture-latest-windows-x64.zip
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

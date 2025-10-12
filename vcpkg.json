@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "audiocapture",
+  "version": "1.0.0",
+  "dependencies": [
+    "opus",
+    "ogg",
+    "libflac",
+    "nlohmann-json"
+  ],
+  "builtin-baseline": "c8696863d371ab7f46545de4e661c3f42d5d2e9b",
+  "overrides": []
+}
