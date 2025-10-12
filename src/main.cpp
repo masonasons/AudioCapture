@@ -232,7 +232,7 @@ void InitializeControls(HWND hwnd) {
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
     );
 
-    // Process list (ListView) - allow multiple selection
+    // Process list (ListView) - with checkboxes for multi-select
     g_hProcessList = CreateWindowEx(
         WS_EX_CLIENTEDGE,
         WC_LISTVIEW,
@@ -244,6 +244,9 @@ void InitializeControls(HWND hwnd) {
         g_hInst,
         nullptr
     );
+
+    // Enable checkboxes for the process list
+    ListView_SetExtendedListViewStyle(g_hProcessList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
 
     // Set up list view columns
     LVCOLUMN lvc;
@@ -462,6 +465,18 @@ void InitializeControls(HWND hwnd) {
 }
 
 void RefreshProcessList() {
+    // Save checked state before clearing the list
+    std::vector<DWORD> checkedPIDs;
+    int itemCount = ListView_GetItemCount(g_hProcessList);
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hProcessList, i)) {
+            wchar_t pidStr[32];
+            ListView_GetItemText(g_hProcessList, i, 1, pidStr, 32);
+            DWORD pid = (DWORD)_wtoi(pidStr);
+            checkedPIDs.push_back(pid);
+        }
+    }
+
     ListView_DeleteAllItems(g_hProcessList);
     g_processes = g_processEnum->GetAllProcesses();
 
@@ -506,6 +521,14 @@ void RefreshProcessList() {
         // Path (fourth column)
         ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)proc.executablePath.c_str());
 
+        // Restore checked state if this PID was previously checked
+        for (DWORD checkedPID : checkedPIDs) {
+            if (proc.processId == checkedPID) {
+                ListView_SetCheckState(g_hProcessList, index, TRUE);
+                break;
+            }
+        }
+
         displayedCount++;
     }
 
@@ -518,16 +541,25 @@ void RefreshProcessList() {
 }
 
 void StartCapture() {
-    // Get all selected processes
-    std::vector<int> selectedIndices;
-    int index = -1;
-    while ((index = ListView_GetNextItem(g_hProcessList, index, LVNI_SELECTED)) != -1) {
-        selectedIndices.push_back(index);
+    // Get all checked processes
+    std::vector<int> checkedIndices;
+    int itemCount = ListView_GetItemCount(g_hProcessList);
+
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hProcessList, i)) {
+            checkedIndices.push_back(i);
+        }
     }
 
-    if (selectedIndices.empty()) {
-        MessageBox(g_hWnd, L"Please select one or more processes to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
-        return;
+    // If no processes are checked, fall back to the currently focused/selected item
+    if (checkedIndices.empty()) {
+        int focusedIndex = ListView_GetNextItem(g_hProcessList, -1, LVNI_FOCUSED);
+        if (focusedIndex >= 0) {
+            checkedIndices.push_back(focusedIndex);
+        } else {
+            MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
+            return;
+        }
     }
 
     // Get output path
@@ -586,8 +618,8 @@ void StartCapture() {
     int startedCount = 0;
     int alreadyCapturingCount = 0;
 
-    for (int selectedIndex : selectedIndices) {
-        const ProcessInfo& proc = g_processes[selectedIndex];
+    for (int checkedIndex : checkedIndices) {
+        const ProcessInfo& proc = g_processes[checkedIndex];
 
         // Check if already capturing
         if (g_captureManager->IsCapturing(proc.processId)) {
