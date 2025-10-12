@@ -355,7 +355,8 @@ void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size)
 
     // If mixed recording is enabled, also send data to the mixer
     if (m_mixedRecordingEnabled && m_mixer) {
-        m_mixer->AddAudioData(processId, data, size);
+        const WAVEFORMATEX* sessionFormat = session->capture->GetFormat();
+        m_mixer->AddAudioData(processId, data, size, sessionFormat);
     }
 }
 

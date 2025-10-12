@@ -12,11 +12,13 @@ public:
     AudioMixer();
     ~AudioMixer();
 
-    // Initialize with the audio format (all streams must use the same format)
+    // Initialize with the target audio format (mixer output format)
     bool Initialize(const WAVEFORMATEX* format);
 
     // Add audio data from a specific source (identified by sourceId)
-    void AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size);
+    // The sourceFormat parameter specifies the format of the incoming data
+    // Audio will be resampled to match the mixer's target format if needed
+    void AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat);
 
     // Get the mixed audio buffer (call this periodically to get mixed output)
     // Returns true if there's data available, false otherwise
@@ -31,11 +33,14 @@ private:
         UINT32 readPosition;
     };
 
-    WAVEFORMATEX m_format;
+    WAVEFORMATEX m_format;  // Target output format
     bool m_initialized;
     std::mutex m_mutex;
     std::map<DWORD, AudioBuffer> m_buffers;  // Per-source audio buffers
 
     // Mix audio samples based on format
     void MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest, UINT32 frameCount);
+
+    // Resample audio from source format to target format using linear interpolation
+    std::vector<BYTE> ResampleAudio(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat);
 };

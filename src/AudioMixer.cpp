@@ -21,8 +21,8 @@ bool AudioMixer::Initialize(const WAVEFORMATEX* format) {
     return true;
 }
 
-void AudioMixer::AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size) {
-    if (!m_initialized || !data || size == 0) {
+void AudioMixer::AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat) {
+    if (!m_initialized || !data || size == 0 || !sourceFormat) {
         return;
     }
 
@@ -31,8 +31,17 @@ void AudioMixer::AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size) {
     // Get or create buffer for this source
     AudioBuffer& buffer = m_buffers[sourceId];
 
-    // Append new data to the buffer
-    buffer.data.insert(buffer.data.end(), data, data + size);
+    // Check if resampling is needed
+    if (sourceFormat->nSamplesPerSec != m_format.nSamplesPerSec ||
+        sourceFormat->nChannels != m_format.nChannels ||
+        sourceFormat->wBitsPerSample != m_format.wBitsPerSample) {
+        // Resample the audio to match target format
+        std::vector<BYTE> resampledData = ResampleAudio(data, size, sourceFormat);
+        buffer.data.insert(buffer.data.end(), resampledData.begin(), resampledData.end());
+    } else {
+        // No resampling needed, append directly
+        buffer.data.insert(buffer.data.end(), data, data + size);
+    }
 }
 
 bool AudioMixer::GetMixedAudio(std::vector<BYTE>& outBuffer) {
@@ -103,7 +112,7 @@ bool AudioMixer::GetMixedAudio(std::vector<BYTE>& outBuffer) {
             buffer.readPosition = 0;
         }
         // If we've read a significant amount, compact the buffer
-        else if (buffer.readPosition > 48000 * m_format.nBlockAlign) { // Keep last second
+        else if (buffer.readPosition > static_cast<UINT32>(48000 * m_format.nBlockAlign)) { // Keep last second
             buffer.data.erase(buffer.data.begin(), buffer.data.begin() + buffer.readPosition);
             buffer.readPosition = 0;
         }
@@ -167,4 +176,81 @@ void AudioMixer::MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest,
 void AudioMixer::Clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_buffers.clear();
+}
+
+std::vector<BYTE> AudioMixer::ResampleAudio(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat) {
+    // Calculate number of frames in source data
+    UINT32 sourceBytesPerFrame = sourceFormat->nBlockAlign;
+    UINT32 sourceFrameCount = size / sourceBytesPerFrame;
+
+    // Calculate target frame count based on sample rate ratio
+    double ratio = (double)m_format.nSamplesPerSec / (double)sourceFormat->nSamplesPerSec;
+    UINT32 targetFrameCount = (UINT32)(sourceFrameCount * ratio);
+
+    // Calculate target buffer size
+    UINT32 targetBytesPerFrame = m_format.nBlockAlign;
+    UINT32 targetSize = targetFrameCount * targetBytesPerFrame;
+
+    std::vector<BYTE> resampledData(targetSize);
+
+    // Only support 32-bit float for now (most common for WASAPI)
+    if (sourceFormat->wBitsPerSample == 32 && m_format.wBitsPerSample == 32) {
+        const float* sourceSamples = reinterpret_cast<const float*>(data);
+        float* targetSamples = reinterpret_cast<float*>(resampledData.data());
+
+        UINT32 sourceChannels = sourceFormat->nChannels;
+        UINT32 targetChannels = m_format.nChannels;
+
+        // Linear interpolation resampling
+        for (UINT32 targetFrame = 0; targetFrame < targetFrameCount; targetFrame++) {
+            // Calculate source position (floating point)
+            double sourcePos = (double)targetFrame / ratio;
+            UINT32 sourceFrameLow = (UINT32)sourcePos;
+            UINT32 sourceFrameHigh = std::min(sourceFrameLow + 1, sourceFrameCount - 1);
+            float frac = (float)(sourcePos - sourceFrameLow);
+
+            // Interpolate each channel
+            for (UINT32 ch = 0; ch < targetChannels; ch++) {
+                // Handle channel count mismatch
+                UINT32 sourceCh = (ch < sourceChannels) ? ch : (sourceChannels - 1);
+
+                float sampleLow = sourceSamples[sourceFrameLow * sourceChannels + sourceCh];
+                float sampleHigh = sourceSamples[sourceFrameHigh * sourceChannels + sourceCh];
+                float interpolated = sampleLow + (sampleHigh - sampleLow) * frac;
+
+                targetSamples[targetFrame * targetChannels + ch] = interpolated;
+            }
+        }
+    }
+    else if (sourceFormat->wBitsPerSample == 16 && m_format.wBitsPerSample == 16) {
+        // 16-bit PCM resampling
+        const int16_t* sourceSamples = reinterpret_cast<const int16_t*>(data);
+        int16_t* targetSamples = reinterpret_cast<int16_t*>(resampledData.data());
+
+        UINT32 sourceChannels = sourceFormat->nChannels;
+        UINT32 targetChannels = m_format.nChannels;
+
+        for (UINT32 targetFrame = 0; targetFrame < targetFrameCount; targetFrame++) {
+            double sourcePos = (double)targetFrame / ratio;
+            UINT32 sourceFrameLow = (UINT32)sourcePos;
+            UINT32 sourceFrameHigh = std::min(sourceFrameLow + 1, sourceFrameCount - 1);
+            float frac = (float)(sourcePos - sourceFrameLow);
+
+            for (UINT32 ch = 0; ch < targetChannels; ch++) {
+                UINT32 sourceCh = (ch < sourceChannels) ? ch : (sourceChannels - 1);
+
+                int16_t sampleLow = sourceSamples[sourceFrameLow * sourceChannels + sourceCh];
+                int16_t sampleHigh = sourceSamples[sourceFrameHigh * sourceChannels + sourceCh];
+                float interpolated = sampleLow + (sampleHigh - sampleLow) * frac;
+
+                targetSamples[targetFrame * targetChannels + ch] = (int16_t)interpolated;
+            }
+        }
+    }
+    else {
+        // Unsupported format combination - just copy without resampling (fallback)
+        resampledData.assign(data, data + size);
+    }
+
+    return resampledData;
 }
