@@ -22,6 +22,7 @@ Before building, ensure you have the following installed:
 
 4. **Required packages via vcpkg**:
    ```batch
+   vcpkg install libflac:x64-windows
    vcpkg install opus:x64-windows
    vcpkg install ogg:x64-windows
    vcpkg install nlohmann-json:x64-windows
@@ -38,7 +39,7 @@ The script will:
 2. Configure CMake with vcpkg
 3. Build the Release configuration
 4. Copy the executable to the `package` folder
-5. Copy required DLLs (opus.dll, ogg.dll) to the `package` folder
+5. Copy required DLLs (opus.dll, ogg.dll, FLAC.dll, FLAC++.dll) to the `package` folder
 
 ### Method 2: Manual Build
 
@@ -63,6 +64,8 @@ The script will:
    copy bin\Release\AudioCapture.exe ..\package\AudioCapture.exe
    copy C:\vcpkg\installed\x64-windows\bin\opus.dll ..\package\opus.dll
    copy C:\vcpkg\installed\x64-windows\bin\ogg.dll ..\package\ogg.dll
+   copy C:\vcpkg\installed\x64-windows\bin\FLAC.dll ..\package\FLAC.dll
+   copy C:\vcpkg\installed\x64-windows\bin\FLAC++.dll ..\package\FLAC++.dll
    ```
 
 ## Output
@@ -72,6 +75,8 @@ After a successful build, you'll find:
 - **`package\AudioCapture.exe`** - The main application
 - **`package\opus.dll`** - Opus codec library
 - **`package\ogg.dll`** - Ogg container library
+- **`package\FLAC.dll`** - FLAC codec library
+- **`package\FLAC++.dll`** - FLAC C++ wrapper library
 
 You can run the application directly from the `package` folder.
 
@@ -89,7 +94,7 @@ This will:
 
 The package includes:
 - AudioCapture.exe
-- opus.dll and ogg.dll
+- opus.dll, ogg.dll, FLAC.dll, and FLAC++.dll
 - README.txt (user instructions)
 - LICENSE.txt (if available)
 - AudioCaptures\ (default output folder)
@@ -118,7 +123,7 @@ To remove all build artifacts and start fresh:
   ```
 - If missing, install them:
   ```batch
-  vcpkg install opus:x64-windows ogg:x64-windows nlohmann-json:x64-windows
+  vcpkg install libflac:x64-windows opus:x64-windows ogg:x64-windows nlohmann-json:x64-windows
   ```
 
 ### Build errors
@@ -139,6 +144,8 @@ And in **package.bat** update the DLL paths:
 ```batch
 C:\your\path\to\vcpkg\installed\x64-windows\bin\opus.dll
 C:\your\path\to\vcpkg\installed\x64-windows\bin\ogg.dll
+C:\your\path\to\vcpkg\installed\x64-windows\bin\FLAC.dll
+C:\your\path\to\vcpkg\installed\x64-windows\bin\FLAC++.dll
 ```
 
 ### Building Debug version
@@ -153,16 +160,7 @@ The debug executable will be at `build\bin\Debug\AudioCapture.exe`
 
 ## System Requirements
 
-- **OS**: Windows 10 Build 20348 or later (for per-process audio capture)
+- **OS**: Windows 10 Build 19045 or later (tested and working)
+  - Build 20348+ recommended for optimal per-process audio capture
 - **Architecture**: x64 (64-bit)
 - **Compiler**: MSVC 2019 or later
-
-## Features
-
-The built application includes:
-- Per-process audio capture (Windows 10 21H2+)
-- System-wide audio capture (fallback)
-- Multiple output formats: WAV, MP3, Opus
-- Configurable bitrates for MP3 (128-320 kbps) and Opus (64-256 kbps)
-- Automatic filename generation: `ProcessName-YYYY_MM_DD-HH_MM_SS.ext`
-- Settings persistence (format and bitrate preferences)
