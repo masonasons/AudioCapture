@@ -52,12 +52,14 @@ HWND g_hRecordingModeLabel;
 HWND g_hMicrophoneCheckbox;
 HWND g_hMicrophoneDeviceCombo;
 HWND g_hMicrophoneDeviceLabel;
+HWND g_hFormatLabel;
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
 std::unique_ptr<AudioDeviceEnumerator> g_audioDeviceEnum;
 std::vector<ProcessInfo> g_processes;
 bool g_useWinRT = false;  // Track whether we initialized with WinRT or COM
+bool g_supportsProcessCapture = false;  // Track whether OS supports process-specific capture
 
 // Window class name
 const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
@@ -102,8 +104,30 @@ bool IsWindows8OrGreater() {
     return false;
 }
 
+// Helper to detect if process-specific capture is supported (Windows 10 Build 19041+)
+bool SupportsProcessCapture() {
+    typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+    if (!hNtdll) return false;
+
+    RtlGetVersionPtr RtlGetVersion = (RtlGetVersionPtr)GetProcAddress(hNtdll, "RtlGetVersion");
+    if (!RtlGetVersion) return false;
+
+    RTL_OSVERSIONINFOW osvi = { 0 };
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+    if (RtlGetVersion(&osvi) == 0) {
+        // Windows 10 version 2004 (build 19041) and later supports process-specific capture
+        // Windows 11 is version 10.0.22000+
+        return (osvi.dwMajorVersion == 10 && osvi.dwBuildNumber >= 19041) || (osvi.dwMajorVersion > 10);
+    }
+    return false;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_hInst = hInstance;
+
+    // Detect OS capabilities
+    g_supportsProcessCapture = SupportsProcessCapture();
 
     // Initialize COM/WinRT based on Windows version
     // Windows 8+ supports WinRT (RoInitialize)
@@ -151,11 +175,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     RegisterClass(&wc);
 
-    // Create window
+    // Create window with appropriate title
+    const wchar_t* windowTitle = g_supportsProcessCapture ?
+        L"Audio Capture - Per-Process Recording" :
+        L"Audio Capture - System Audio";
+
     g_hWnd = CreateWindowEx(
         0,
         CLASS_NAME,
-        L"Audio Capture - Per-Process Recording",
+        windowTitle,
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
         nullptr,
@@ -201,8 +229,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         InitializeControls(hwnd);
         LoadSettings();
         RefreshProcessList();
-        // Set initial focus to the process list
-        SetFocus(g_hProcessList);
+        // Set initial focus based on OS support
+        if (g_supportsProcessCapture) {
+            SetFocus(g_hProcessList);
+        } else {
+            SetFocus(g_hStartBtn);
+        }
         // Start timer for updating recording list (every 500ms)
         SetTimer(hwnd, 1, 500, nullptr);
         // Populate devices after window is fully created
@@ -243,7 +275,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 ShowWindow(g_hStopAllBtn, SW_HIDE);
                 UpdateRecordingList();
                 SetWindowText(g_hStatusText, L"All captures stopped.");
-                SetFocus(g_hProcessList);
+                if (g_supportsProcessCapture) {
+                    SetFocus(g_hProcessList);
+                } else {
+                    SetFocus(g_hStartBtn);
+                }
             }
             break;
 
@@ -251,14 +287,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             g_captureManager->PauseAllCaptures();
             SetWindowText(g_hStatusText, L"All captures paused.");
             UpdateRecordingList();  // Update button states immediately
-            SetFocus(g_hProcessList);
+            if (g_supportsProcessCapture) {
+                SetFocus(g_hProcessList);
+            } else {
+                SetFocus(g_hStartBtn);
+            }
             break;
 
         case IDC_RESUME_ALL_BTN:
             g_captureManager->ResumeAllCaptures();
             SetWindowText(g_hStatusText, L"All captures resumed.");
             UpdateRecordingList();  // Update button states immediately
-            SetFocus(g_hProcessList);
+            if (g_supportsProcessCapture) {
+                SetFocus(g_hProcessList);
+            } else {
+                SetFocus(g_hStartBtn);
+            }
             break;
 
         case IDC_BROWSE_BTN:
@@ -305,24 +349,32 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int width = rcClient.right - rcClient.left;
         int height = rcClient.bottom - rcClient.top;
 
-        // Adjust control positions and sizes
-        SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
-        SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
-        SetWindowPos(g_hRefreshBtn, nullptr, 10, 215, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 218, 280, 20, SWP_NOZORDER);
-        SetWindowPos(g_hFormatCombo, nullptr, 10, 245, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPathLabel, nullptr, 10, 275, 100, 20, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPath, nullptr, 10, 295, width - 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, 295, 75, 25, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeLabel, nullptr, 10, 330, 140, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeCombo, nullptr, 150, 327, 150, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, 360, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopBtn, nullptr, 120, 360, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopAllBtn, nullptr, 230, 360, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hPauseAllBtn, nullptr, 340, 360, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hResumeAllBtn, nullptr, 450, 360, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingListLabel, nullptr, 10, 400, 200, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingList, nullptr, 10, 420, width - 20, height - 470, SWP_NOZORDER);
+        // Adjust control positions and sizes based on whether process list is visible
+        int topOffset = g_supportsProcessCapture ? 245 : 10;
+
+        if (g_supportsProcessCapture) {
+            SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
+            SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
+            SetWindowPos(g_hRefreshBtn, nullptr, 10, 215, 100, 25, SWP_NOZORDER);
+            SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 218, 280, 20, SWP_NOZORDER);
+        } else {
+            // Show format label when process list is hidden
+            SetWindowPos(g_hFormatLabel, nullptr, 10, topOffset - 20, 60, 20, SWP_NOZORDER);
+        }
+
+        SetWindowPos(g_hFormatCombo, nullptr, 10, topOffset, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hOutputPathLabel, nullptr, 10, topOffset + 30, 100, 20, SWP_NOZORDER);
+        SetWindowPos(g_hOutputPath, nullptr, 10, topOffset + 50, width - 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50, 75, 25, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85, 140, 20, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82, 150, 25, SWP_NOZORDER);
+        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStopBtn, nullptr, 120, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingListLabel, nullptr, 10, topOffset + 155, 200, 20, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingList, nullptr, 10, topOffset + 175, width - 20, height - (topOffset + 225), SWP_NOZORDER);
         SetWindowPos(g_hStatusText, nullptr, 10, height - 40, width - 20, 30, SWP_NOZORDER);
         return 0;
     }
@@ -345,10 +397,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 void InitializeControls(HWND hwnd) {
+    // Determine visibility based on OS support
+    DWORD processListVisibility = g_supportsProcessCapture ? (WS_CHILD | WS_VISIBLE) : WS_CHILD;
+
     // Process list label
     g_hProcessListLabel = CreateWindow(
         L"STATIC", L"Available Processes:",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        processListVisibility | SS_LEFT,
         10, 10, 200, 20,
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
     );
@@ -358,7 +413,7 @@ void InitializeControls(HWND hwnd) {
         WS_EX_CLIENTEDGE,
         WC_LISTVIEW,
         L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT,
+        processListVisibility | WS_TABSTOP | LVS_REPORT,
         10, 30, 760, 180,
         hwnd,
         (HMENU)IDC_PROCESS_LIST,
@@ -391,7 +446,7 @@ void InitializeControls(HWND hwnd) {
     // Refresh button
     g_hRefreshBtn = CreateWindow(
         L"BUTTON", L"Refresh",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        processListVisibility | WS_TABSTOP | BS_PUSHBUTTON,
         10, 215, 100, 25,
         hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr
     );
@@ -399,9 +454,17 @@ void InitializeControls(HWND hwnd) {
     // Show audio only checkbox
     g_hShowAudioOnlyCheckbox = CreateWindow(
         L"BUTTON", L"Show only processes with active audio",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
         120, 218, 280, 20,
         hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
+    );
+
+    // Format label (only visible when process list is hidden)
+    g_hFormatLabel = CreateWindow(
+        L"STATIC", L"Format:",
+        WS_CHILD | (g_supportsProcessCapture ? 0 : WS_VISIBLE) | SS_LEFT,
+        10, -15, 60, 20,
+        hwnd, nullptr, g_hInst, nullptr
     );
 
     // Format combo box
@@ -686,6 +749,12 @@ void InitializeControls(HWND hwnd) {
 }
 
 void RefreshProcessList() {
+    // If process capture is not supported, don't populate the list
+    if (!g_supportsProcessCapture) {
+        SetWindowText(g_hStatusText, L"System audio capture mode. Per-process capture not available on this OS version.");
+        return;
+    }
+
     // Save checked state before clearing the list
     std::vector<DWORD> checkedPIDs;
     int itemCount = ListView_GetItemCount(g_hProcessList);
@@ -788,22 +857,35 @@ void RefreshProcessList() {
 void StartCapture() {
     // Get all checked processes
     std::vector<int> checkedIndices;
-    int itemCount = ListView_GetItemCount(g_hProcessList);
 
-    for (int i = 0; i < itemCount; i++) {
-        if (ListView_GetCheckState(g_hProcessList, i)) {
-            checkedIndices.push_back(i);
-        }
-    }
-
-    // If no processes are checked, fall back to the currently focused/selected item
-    if (checkedIndices.empty()) {
-        int focusedIndex = ListView_GetNextItem(g_hProcessList, -1, LVNI_FOCUSED);
-        if (focusedIndex >= 0) {
-            checkedIndices.push_back(focusedIndex);
-        } else {
-            MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
+    // If process capture is not supported, automatically capture system audio (PID 0)
+    if (!g_supportsProcessCapture) {
+        // Check if already capturing system audio
+        if (g_captureManager->IsCapturing(0)) {
+            MessageBox(g_hWnd, L"System audio is already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
             return;
+        }
+        // Force system audio capture
+        checkedIndices.push_back(-1);  // Marker for system audio
+    } else {
+        // Normal process selection mode
+        int itemCount = ListView_GetItemCount(g_hProcessList);
+
+        for (int i = 0; i < itemCount; i++) {
+            if (ListView_GetCheckState(g_hProcessList, i)) {
+                checkedIndices.push_back(i);
+            }
+        }
+
+        // If no processes are checked, fall back to the currently focused/selected item
+        if (checkedIndices.empty()) {
+            int focusedIndex = ListView_GetNextItem(g_hProcessList, -1, LVNI_FOCUSED);
+            if (focusedIndex >= 0) {
+                checkedIndices.push_back(focusedIndex);
+            } else {
+                MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
+                return;
+            }
         }
     }
 
@@ -896,15 +978,24 @@ void StartCapture() {
     int alreadyCapturingCount = 0;
 
     for (int checkedIndex : checkedIndices) {
-        // Get process info from ListView (not from g_processes, because system audio isn't in that vector)
-        wchar_t processNameBuf[256];
-        wchar_t pidStrBuf[32];
+        std::wstring processName;
+        DWORD processId;
 
-        ListView_GetItemText(g_hProcessList, checkedIndex, 0, processNameBuf, 256);
-        ListView_GetItemText(g_hProcessList, checkedIndex, 1, pidStrBuf, 32);
+        // If process capture not supported, use system audio defaults
+        if (!g_supportsProcessCapture) {
+            processName = L"[System Audio - All Processes]";
+            processId = 0;
+        } else {
+            // Get process info from ListView (not from g_processes, because system audio isn't in that vector)
+            wchar_t processNameBuf[256];
+            wchar_t pidStrBuf[32];
 
-        std::wstring processName = processNameBuf;
-        DWORD processId = (DWORD)_wtoi(pidStrBuf);
+            ListView_GetItemText(g_hProcessList, checkedIndex, 0, processNameBuf, 256);
+            ListView_GetItemText(g_hProcessList, checkedIndex, 1, pidStrBuf, 32);
+
+            processName = processNameBuf;
+            processId = (DWORD)_wtoi(pidStrBuf);
+        }
 
         // Check if already capturing
         if (g_captureManager->IsCapturing(processId)) {
@@ -1091,8 +1182,12 @@ void StopCapture() {
             g_captureManager->DisableMixedRecording(); // Stop mixed recording if no more sessions
         }
 
-        // Restore focus to process list to prevent keyboard focus issues
-        SetFocus(g_hProcessList);
+        // Restore focus to appropriate control to prevent keyboard focus issues
+        if (g_supportsProcessCapture) {
+            SetFocus(g_hProcessList);
+        } else {
+            SetFocus(g_hStartBtn);
+        }
     }
 }
 

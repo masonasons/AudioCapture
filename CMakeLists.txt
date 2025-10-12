@@ -69,10 +69,11 @@ target_link_libraries(AudioCapture PRIVATE
     nlohmann_json::nlohmann_json
 )
 
-# Enable Windows subsystem
+# Enable Windows subsystem and static runtime
 set_target_properties(AudioCapture PROPERTIES
     WIN32_EXECUTABLE TRUE
     LINK_FLAGS "/DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
 # Add compile definitions

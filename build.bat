@@ -14,7 +14,7 @@ if not exist "build\CMakeCache.txt" (
     cd build
 
     echo Configuring CMake...
-    "C:\Program Files\CMake\bin\cmake.exe" .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+    "C:\Program Files\CMake\bin\cmake.exe" .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
 
     if errorlevel 1 (
         echo ERROR: CMake configuration failed!
@@ -60,39 +60,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo Copying DLL dependencies to package folder...
-
-REM Copy Opus DLL
-if exist "C:\vcpkg\installed\x64-windows\bin\opus.dll" (
-    copy /Y "C:\vcpkg\installed\x64-windows\bin\opus.dll" "package\opus.dll"
-    echo Copied opus.dll
-) else (
-    echo WARNING: opus.dll not found
-)
-
-REM Copy Ogg DLL
-if exist "C:\vcpkg\installed\x64-windows\bin\ogg.dll" (
-    copy /Y "C:\vcpkg\installed\x64-windows\bin\ogg.dll" "package\ogg.dll"
-    echo Copied ogg.dll
-) else (
-    echo WARNING: ogg.dll not found
-)
-
-REM Copy FLAC DLLs
-if exist "C:\vcpkg\installed\x64-windows\bin\FLAC.dll" (
-    copy /Y "C:\vcpkg\installed\x64-windows\bin\FLAC.dll" "package\FLAC.dll"
-    echo Copied FLAC.dll
-) else (
-    echo WARNING: FLAC.dll not found
-)
-
-if exist "C:\vcpkg\installed\x64-windows\bin\FLAC++.dll" (
-    copy /Y "C:\vcpkg\installed\x64-windows\bin\FLAC++.dll" "package\FLAC++.dll"
-    echo Copied FLAC++.dll
-) else (
-    echo WARNING: FLAC++.dll not found
-)
-
+echo Libraries are statically linked - no DLLs needed.
 echo.
 echo ========================================
 echo Build complete!
