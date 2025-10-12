@@ -8,6 +8,8 @@ struct ProcessInfo {
     DWORD processId;
     std::wstring processName;
     std::wstring executablePath;
+    std::wstring windowTitle;
+    bool hasActiveAudio;
 };
 
 class ProcessEnumerator {
@@ -20,6 +22,12 @@ public:
 
     // Get list of all running processes
     std::vector<ProcessInfo> GetAllProcesses();
+
+    // Get window title for a specific process (lazy loading)
+    std::wstring GetWindowTitle(DWORD processId);
+
+    // Check if process has active audio (lazy loading)
+    bool CheckProcessHasActiveAudio(DWORD processId);
 
 private:
     std::wstring GetProcessName(DWORD processId);

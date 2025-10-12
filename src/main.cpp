@@ -38,6 +38,7 @@ HWND g_hRecordingListLabel;
 HWND g_hSkipSilenceCheckbox;
 HWND g_hFlacCompressionCombo;
 HWND g_hFlacCompressionLabel;
+HWND g_hShowAudioOnlyCheckbox;
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
@@ -171,6 +172,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 OnFormatChanged();
             }
             break;
+
+        case IDC_SHOW_AUDIO_ONLY_CHECKBOX:
+            if (wmEvent == BN_CLICKED) {
+                RefreshProcessList();
+            }
+            break;
         }
         return 0;
     }
@@ -185,8 +192,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // Adjust control positions and sizes
         SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
         SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
-        SetWindowPos(g_hRefreshBtn, nullptr, 10, 240, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hFormatCombo, nullptr, 120, 240, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hRefreshBtn, nullptr, 10, 215, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 218, 280, 20, SWP_NOZORDER);
+        SetWindowPos(g_hFormatCombo, nullptr, 10, 245, 100, 25, SWP_NOZORDER);
         SetWindowPos(g_hOutputPathLabel, nullptr, 10, 275, 100, 20, SWP_NOZORDER);
         SetWindowPos(g_hOutputPath, nullptr, 10, 295, width - 100, 25, SWP_NOZORDER);
         SetWindowPos(g_hBrowseBtn, nullptr, width - 85, 295, 75, 25, SWP_NOZORDER);
@@ -240,31 +248,43 @@ void InitializeControls(HWND hwnd) {
     // Set up list view columns
     LVCOLUMN lvc;
     lvc.mask = LVCF_TEXT | LVCF_WIDTH;
-    lvc.cx = 250;
+    lvc.cx = 180;
     lvc.pszText = (LPWSTR)L"Process Name";
     ListView_InsertColumn(g_hProcessList, 0, &lvc);
 
-    lvc.cx = 80;
+    lvc.cx = 60;
     lvc.pszText = (LPWSTR)L"PID";
     ListView_InsertColumn(g_hProcessList, 1, &lvc);
 
-    lvc.cx = 400;
-    lvc.pszText = (LPWSTR)L"Path";
+    lvc.cx = 250;
+    lvc.pszText = (LPWSTR)L"Window Title";
     ListView_InsertColumn(g_hProcessList, 2, &lvc);
+
+    lvc.cx = 300;
+    lvc.pszText = (LPWSTR)L"Path";
+    ListView_InsertColumn(g_hProcessList, 3, &lvc);
 
     // Refresh button
     g_hRefreshBtn = CreateWindow(
         L"BUTTON", L"Refresh",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 240, 100, 25,
+        10, 215, 100, 25,
         hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr
+    );
+
+    // Show audio only checkbox
+    g_hShowAudioOnlyCheckbox = CreateWindow(
+        L"BUTTON", L"Show only processes with active audio",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        120, 218, 280, 20,
+        hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
     );
 
     // Format combo box
     g_hFormatCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-        120, 240, 100, 200,
+        10, 245, 100, 200,
         hwnd, (HMENU)IDC_FORMAT_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"WAV");
@@ -277,7 +297,7 @@ void InitializeControls(HWND hwnd) {
     g_hMp3BitrateLabel = CreateWindow(
         L"STATIC", L"MP3 Bitrate:",
         WS_CHILD | SS_LEFT,
-        230, 243, 80, 20,
+        120, 248, 80, 20,
         hwnd, (HMENU)IDC_MP3_BITRATE_LABEL, g_hInst, nullptr
     );
 
@@ -285,7 +305,7 @@ void InitializeControls(HWND hwnd) {
     g_hMp3BitrateCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        310, 240, 80, 200,
+        200, 245, 80, 200,
         hwnd, (HMENU)IDC_MP3_BITRATE_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"128 kbps");
@@ -298,7 +318,7 @@ void InitializeControls(HWND hwnd) {
     g_hOpusBitrateLabel = CreateWindow(
         L"STATIC", L"Opus Bitrate:",
         WS_CHILD | SS_LEFT,
-        230, 243, 80, 20,
+        120, 248, 80, 20,
         hwnd, (HMENU)IDC_OPUS_BITRATE_LABEL, g_hInst, nullptr
     );
 
@@ -306,7 +326,7 @@ void InitializeControls(HWND hwnd) {
     g_hOpusBitrateCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        310, 240, 80, 200,
+        200, 245, 80, 200,
         hwnd, (HMENU)IDC_OPUS_BITRATE_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"64 kbps");
@@ -320,7 +340,7 @@ void InitializeControls(HWND hwnd) {
     g_hFlacCompressionLabel = CreateWindow(
         L"STATIC", L"FLAC Level:",
         WS_CHILD | SS_LEFT,
-        230, 243, 80, 20,
+        120, 248, 80, 20,
         hwnd, (HMENU)IDC_FLAC_COMPRESSION_LABEL, g_hInst, nullptr
     );
 
@@ -328,7 +348,7 @@ void InitializeControls(HWND hwnd) {
     g_hFlacCompressionCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        310, 240, 80, 200,
+        200, 245, 80, 200,
         hwnd, (HMENU)IDC_FLAC_COMPRESSION_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"0 (Fast)");
@@ -346,7 +366,7 @@ void InitializeControls(HWND hwnd) {
     g_hSkipSilenceCheckbox = CreateWindow(
         L"BUTTON", L"Skip silence",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        400, 240, 120, 25,
+        290, 247, 120, 20,
         hwnd, (HMENU)IDC_SKIP_SILENCE_CHECKBOX, g_hInst, nullptr
     );
 
@@ -445,12 +465,31 @@ void RefreshProcessList() {
     ListView_DeleteAllItems(g_hProcessList);
     g_processes = g_processEnum->GetAllProcesses();
 
+    // Check if we should filter by active audio
+    bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    int displayedCount = 0;
     for (size_t i = 0; i < g_processes.size(); i++) {
-        const ProcessInfo& proc = g_processes[i];
+        ProcessInfo& proc = g_processes[i];
+
+        // Fetch window title and audio status on-demand (lazy loading for performance)
+        if (proc.windowTitle.empty()) {
+            proc.windowTitle = g_processEnum->GetWindowTitle(proc.processId);
+        }
+
+        // Only check audio status if we're filtering by it
+        if (showAudioOnly) {
+            proc.hasActiveAudio = g_processEnum->CheckProcessHasActiveAudio(proc.processId);
+
+            // Skip if filtering and process doesn't have active audio
+            if (!proc.hasActiveAudio) {
+                continue;
+            }
+        }
 
         LVITEM lvi = {};
         lvi.mask = LVIF_TEXT;
-        lvi.iItem = static_cast<int>(i);
+        lvi.iItem = displayedCount;
 
         // Process name (first column)
         lvi.pszText = (LPWSTR)proc.processName.c_str();
@@ -461,11 +500,21 @@ void RefreshProcessList() {
         swprintf_s(pidStr, L"%lu", proc.processId);
         ListView_SetItemText(g_hProcessList, index, 1, pidStr);
 
-        // Path (third column)
-        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)proc.executablePath.c_str());
+        // Window Title (third column)
+        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)proc.windowTitle.c_str());
+
+        // Path (fourth column)
+        ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)proc.executablePath.c_str());
+
+        displayedCount++;
     }
 
-    SetWindowText(g_hStatusText, L"Process list refreshed.");
+    std::wstring statusMsg = L"Process list refreshed. Showing " + std::to_wstring(displayedCount) + L" process(es)";
+    if (showAudioOnly) {
+        statusMsg += L" with active audio";
+    }
+    statusMsg += L".";
+    SetWindowText(g_hStatusText, statusMsg.c_str());
 }
 
 void StartCapture() {
