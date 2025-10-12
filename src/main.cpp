@@ -35,6 +35,9 @@ HWND g_hOpusBitrateLabel;
 HWND g_hProcessListLabel;
 HWND g_hOutputPathLabel;
 HWND g_hRecordingListLabel;
+HWND g_hSkipSilenceCheckbox;
+HWND g_hFlacCompressionCombo;
+HWND g_hFlacCompressionLabel;
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
@@ -267,6 +270,7 @@ void InitializeControls(HWND hwnd) {
     SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"WAV");
     SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"MP3");
     SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"Opus");
+    SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"FLAC");
     SendMessage(g_hFormatCombo, CB_SETCURSEL, 0, 0);
 
     // MP3 bitrate label
@@ -311,6 +315,40 @@ void InitializeControls(HWND hwnd) {
     SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"192 kbps");
     SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"256 kbps");
     SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, 2, 0);  // Default to 128 kbps
+
+    // FLAC compression label
+    g_hFlacCompressionLabel = CreateWindow(
+        L"STATIC", L"FLAC Level:",
+        WS_CHILD | SS_LEFT,
+        230, 243, 80, 20,
+        hwnd, (HMENU)IDC_FLAC_COMPRESSION_LABEL, g_hInst, nullptr
+    );
+
+    // FLAC compression combo box
+    g_hFlacCompressionCombo = CreateWindow(
+        WC_COMBOBOX, L"",
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+        310, 240, 80, 200,
+        hwnd, (HMENU)IDC_FLAC_COMPRESSION_COMBO, g_hInst, nullptr
+    );
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"0 (Fast)");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"1");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"2");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"3");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"4");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"5 (Default)");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"6");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"7");
+    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"8 (Best)");
+    SendMessage(g_hFlacCompressionCombo, CB_SETCURSEL, 5, 0);  // Default to level 5
+
+    // Skip silence checkbox
+    g_hSkipSilenceCheckbox = CreateWindow(
+        L"BUTTON", L"Skip silence",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        400, 240, 120, 25,
+        hwnd, (HMENU)IDC_SKIP_SILENCE_CHECKBOX, g_hInst, nullptr
+    );
 
     // Output path label
     g_hOutputPathLabel = CreateWindow(
@@ -478,11 +516,23 @@ void StartCapture() {
             bitrate = (bitrateIndex >= 0 && bitrateIndex < 5) ? opusBitrates[bitrateIndex] : 128000;
         }
         break;
+    case 3:
+        format = AudioFormat::FLAC;
+        extension = L".flac";
+        // Get FLAC compression level from combo box (0-8)
+        {
+            int compressionIndex = (int)SendMessage(g_hFlacCompressionCombo, CB_GETCURSEL, 0, 0);
+            bitrate = (compressionIndex >= 0 && compressionIndex <= 8) ? compressionIndex : 5;
+        }
+        break;
     default:
         format = AudioFormat::WAV;
         extension = L".wav";
         break;
     }
+
+    // Get skip silence option
+    bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     int startedCount = 0;
     int alreadyCapturingCount = 0;
@@ -519,8 +569,8 @@ void StartCapture() {
 
         fullPath += cleanProcessName + L"-" + timestamp + extension;
 
-        // Start capture with bitrate
-        if (g_captureManager->StartCapture(proc.processId, proc.processName, fullPath, format, bitrate)) {
+        // Start capture with bitrate and skip silence option
+        if (g_captureManager->StartCapture(proc.processId, proc.processName, fullPath, format, bitrate, skipSilence)) {
             startedCount++;
         }
     }
@@ -563,6 +613,9 @@ void StopCapture() {
         if (sessions.empty()) {
             EnableWindow(g_hStopBtn, FALSE);
         }
+
+        // Restore focus to process list to prevent keyboard focus issues
+        SetFocus(g_hProcessList);
     }
 }
 
@@ -715,7 +768,7 @@ void LoadSettings() {
             // Load format
             if (settings.contains("format") && settings["format"].is_number_integer()) {
                 int formatIndex = settings["format"];
-                if (formatIndex >= 0 && formatIndex <= 2) {
+                if (formatIndex >= 0 && formatIndex <= 3) {
                     SendMessage(g_hFormatCombo, CB_SETCURSEL, formatIndex, 0);
                 }
             }
@@ -734,6 +787,20 @@ void LoadSettings() {
                 if (bitrateIndex >= 0 && bitrateIndex <= 4) {
                     SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, bitrateIndex, 0);
                 }
+            }
+
+            // Load FLAC compression
+            if (settings.contains("flacCompression") && settings["flacCompression"].is_number_integer()) {
+                int compressionIndex = settings["flacCompression"];
+                if (compressionIndex >= 0 && compressionIndex <= 8) {
+                    SendMessage(g_hFlacCompressionCombo, CB_SETCURSEL, compressionIndex, 0);
+                }
+            }
+
+            // Load skip silence option
+            if (settings.contains("skipSilence") && settings["skipSilence"].is_boolean()) {
+                bool skipSilence = settings["skipSilence"];
+                SendMessage(g_hSkipSilenceCheckbox, BM_SETCHECK, skipSilence ? BST_CHECKED : BST_UNCHECKED, 0);
             }
         }
         catch (...) {
@@ -758,12 +825,19 @@ void SaveSettings() {
     int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
     settings["format"] = formatIndex;
 
-    // Save bitrates
+    // Save bitrates and compression
     int mp3BitrateIndex = (int)SendMessage(g_hMp3BitrateCombo, CB_GETCURSEL, 0, 0);
     settings["mp3Bitrate"] = mp3BitrateIndex;
 
     int opusBitrateIndex = (int)SendMessage(g_hOpusBitrateCombo, CB_GETCURSEL, 0, 0);
     settings["opusBitrate"] = opusBitrateIndex;
+
+    int flacCompressionIndex = (int)SendMessage(g_hFlacCompressionCombo, CB_GETCURSEL, 0, 0);
+    settings["flacCompression"] = flacCompressionIndex;
+
+    // Save skip silence option
+    bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["skipSilence"] = skipSilence;
 
     // Write to file
     std::wstring settingsPath = GetSettingsFilePath();
@@ -777,13 +851,15 @@ void SaveSettings() {
 void OnFormatChanged() {
     int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
 
-    // Hide all bitrate controls first
+    // Hide all bitrate/compression controls first
     ShowWindow(g_hMp3BitrateLabel, SW_HIDE);
     ShowWindow(g_hMp3BitrateCombo, SW_HIDE);
     ShowWindow(g_hOpusBitrateLabel, SW_HIDE);
     ShowWindow(g_hOpusBitrateCombo, SW_HIDE);
+    ShowWindow(g_hFlacCompressionLabel, SW_HIDE);
+    ShowWindow(g_hFlacCompressionCombo, SW_HIDE);
 
-    // Show appropriate bitrate control based on format
+    // Show appropriate control based on format
     switch (formatIndex) {
     case 1: // MP3
         ShowWindow(g_hMp3BitrateLabel, SW_SHOW);
@@ -792,6 +868,10 @@ void OnFormatChanged() {
     case 2: // Opus
         ShowWindow(g_hOpusBitrateLabel, SW_SHOW);
         ShowWindow(g_hOpusBitrateCombo, SW_SHOW);
+        break;
+    case 3: // FLAC
+        ShowWindow(g_hFlacCompressionLabel, SW_SHOW);
+        ShowWindow(g_hFlacCompressionCombo, SW_SHOW);
         break;
     }
 }

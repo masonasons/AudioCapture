@@ -4,6 +4,7 @@
 #include "WavWriter.h"
 #include "Mp3Encoder.h"
 #include "OpusEncoder.h"
+#include "FlacEncoder.h"
 #include <memory>
 #include <map>
 #include <mutex>
@@ -11,7 +12,8 @@
 enum class AudioFormat {
     WAV,
     MP3,
-    OPUS
+    OPUS,
+    FLAC
 };
 
 struct CaptureSession {
@@ -23,8 +25,10 @@ struct CaptureSession {
     std::unique_ptr<WavWriter> wavWriter;
     std::unique_ptr<Mp3Encoder> mp3Encoder;
     std::unique_ptr<OpusEncoder> opusEncoder;
+    std::unique_ptr<FlacEncoder> flacEncoder;
     bool isActive;
     UINT64 bytesWritten;
+    bool skipSilence;
 };
 
 class CaptureManager {
@@ -35,7 +39,7 @@ public:
     // Start capturing from a process
     bool StartCapture(DWORD processId, const std::wstring& processName,
                      const std::wstring& outputPath, AudioFormat format,
-                     UINT32 bitrate = 0);
+                     UINT32 bitrate = 0, bool skipSilence = false);
 
     // Stop capturing from a specific process
     bool StopCapture(DWORD processId);

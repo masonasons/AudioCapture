@@ -7,10 +7,10 @@ echo AudioCapture Build Script
 echo ========================================
 echo.
 
-REM Check if build directory exists, if not create it
-if not exist "build" (
-    echo Creating build directory...
-    mkdir build
+REM Check if build directory exists and has CMakeCache.txt
+if not exist "build\CMakeCache.txt" (
+    echo Creating/Configuring build directory...
+    if not exist "build" mkdir build
     cd build
 
     echo Configuring CMake...
@@ -24,7 +24,7 @@ if not exist "build" (
     )
     cd ..
 ) else (
-    echo Build directory already exists.
+    echo Build directory already configured.
 )
 
 echo.
@@ -76,6 +76,21 @@ if exist "C:\vcpkg\installed\x64-windows\bin\ogg.dll" (
     echo Copied ogg.dll
 ) else (
     echo WARNING: ogg.dll not found
+)
+
+REM Copy FLAC DLLs
+if exist "C:\vcpkg\installed\x64-windows\bin\FLAC.dll" (
+    copy /Y "C:\vcpkg\installed\x64-windows\bin\FLAC.dll" "package\FLAC.dll"
+    echo Copied FLAC.dll
+) else (
+    echo WARNING: FLAC.dll not found
+)
+
+if exist "C:\vcpkg\installed\x64-windows\bin\FLAC++.dll" (
+    copy /Y "C:\vcpkg\installed\x64-windows\bin\FLAC++.dll" "package\FLAC++.dll"
+    echo Copied FLAC++.dll
+) else (
+    echo WARNING: FLAC++.dll not found
 )
 
 echo.

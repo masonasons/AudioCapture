@@ -10,7 +10,7 @@ CaptureManager::~CaptureManager() {
 
 bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processName,
                                   const std::wstring& outputPath, AudioFormat format,
-                                  UINT32 bitrate) {
+                                  UINT32 bitrate, bool skipSilence) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Check if already capturing this process
@@ -26,6 +26,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
     session->format = format;
     session->isActive = false;
     session->bytesWritten = 0;
+    session->skipSilence = skipSilence;
 
     // Create audio capture
     session->capture = std::make_unique<AudioCapture>();
@@ -55,6 +56,13 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
         // Use provided bitrate or default to 128000 (128 kbps)
         encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
                                                    bitrate > 0 ? bitrate : 128000);
+        break;
+
+    case AudioFormat::FLAC:
+        session->flacEncoder = std::make_unique<FlacEncoder>();
+        // Use bitrate as compression level (0-8), default to 5
+        encoderReady = session->flacEncoder->Open(outputPath, waveFormat,
+                                                   bitrate > 0 ? std::min(bitrate, 8u) : 5);
         break;
     }
 
@@ -101,6 +109,9 @@ bool CaptureManager::StopCapture(DWORD processId) {
     if (it->second->opusEncoder) {
         it->second->opusEncoder->Close();
     }
+    if (it->second->flacEncoder) {
+        it->second->flacEncoder->Close();
+    }
 
     // Remove session
     m_sessions.erase(it);
@@ -124,6 +135,9 @@ void CaptureManager::StopAllCaptures() {
         }
         if (pair.second->opusEncoder) {
             pair.second->opusEncoder->Close();
+        }
+        if (pair.second->flacEncoder) {
+            pair.second->flacEncoder->Close();
         }
     }
 
@@ -156,6 +170,45 @@ void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size)
 
     CaptureSession* session = it->second.get();
 
+    // Check for silence if skip silence is enabled
+    if (session->skipSilence && size > 0) {
+        const WAVEFORMATEX* format = session->capture->GetFormat();
+        if (format) {
+            bool isSilent = true;
+            UINT32 bytesPerSample = format->wBitsPerSample / 8;
+            UINT32 numSamples = size / bytesPerSample;
+
+            // Define silence threshold (very low amplitude)
+            const int16_t SILENCE_THRESHOLD_16 = 50;  // ~0.15% of max amplitude
+            const int32_t SILENCE_THRESHOLD_32 = 3276;  // ~0.01% of max amplitude
+
+            if (bytesPerSample == 2) {
+                // 16-bit samples
+                const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+                for (UINT32 i = 0; i < numSamples; i++) {
+                    if (abs(samples[i]) > SILENCE_THRESHOLD_16) {
+                        isSilent = false;
+                        break;
+                    }
+                }
+            } else if (bytesPerSample == 4) {
+                // 32-bit samples
+                const int32_t* samples = reinterpret_cast<const int32_t*>(data);
+                for (UINT32 i = 0; i < numSamples; i++) {
+                    if (abs(samples[i]) > SILENCE_THRESHOLD_32) {
+                        isSilent = false;
+                        break;
+                    }
+                }
+            }
+
+            // Skip writing if silent
+            if (isSilent) {
+                return;
+            }
+        }
+    }
+
     // Write data to appropriate encoder
     bool success = false;
     switch (session->format) {
@@ -174,6 +227,12 @@ void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size)
     case AudioFormat::OPUS:
         if (session->opusEncoder) {
             success = session->opusEncoder->WriteData(data, size);
+        }
+        break;
+
+    case AudioFormat::FLAC:
+        if (session->flacEncoder) {
+            success = session->flacEncoder->WriteData(data, size);
         }
         break;
     }

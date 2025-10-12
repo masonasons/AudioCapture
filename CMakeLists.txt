@@ -10,6 +10,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # Find packages
 find_package(Opus CONFIG REQUIRED)
 find_package(Ogg CONFIG REQUIRED)
+find_package(FLAC CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
 # Source files
@@ -20,6 +21,7 @@ set(SOURCES
     src/WavWriter.cpp
     src/Mp3Encoder.cpp
     src/OpusEncoder.cpp
+    src/FlacEncoder.cpp
     src/CaptureManager.cpp
 )
 
@@ -29,6 +31,7 @@ set(HEADERS
     include/WavWriter.h
     include/Mp3Encoder.h
     include/OpusEncoder.h
+    include/FlacEncoder.h
     include/CaptureManager.h
     include/resource.h
 )
@@ -57,6 +60,7 @@ target_link_libraries(AudioCapture PRIVATE
     RuntimeObject.lib
     Opus::opus
     Ogg::ogg
+    FLAC::FLAC FLAC::FLAC++
     nlohmann_json::nlohmann_json
 )
 
