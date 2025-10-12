@@ -33,8 +33,17 @@ public:
     // Stop capturing audio
     void Stop();
 
+    // Pause capturing audio
+    void Pause();
+
+    // Resume capturing audio
+    void Resume();
+
     // Check if currently capturing
     bool IsCapturing() const { return m_isCapturing; }
+
+    // Check if currently paused
+    bool IsPaused() const { return m_isPaused; }
 
     // Get audio format information
     WAVEFORMATEX* GetFormat() const { return m_waveFormat; }
@@ -65,6 +74,7 @@ private:
     WAVEFORMATEX* m_waveFormat;
 
     std::atomic<bool> m_isCapturing;
+    std::atomic<bool> m_isPaused;
     std::thread m_captureThread;
     std::function<void(const BYTE*, UINT32)> m_dataCallback;
 

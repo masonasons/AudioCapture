@@ -62,6 +62,7 @@ target_link_libraries(AudioCapture PRIVATE
     Shlwapi.lib
     Propsys.lib
     RuntimeObject.lib
+    Delayimp.lib
     Opus::opus
     Ogg::ogg
     FLAC::FLAC FLAC::FLAC++
@@ -71,6 +72,7 @@ target_link_libraries(AudioCapture PRIVATE
 # Enable Windows subsystem
 set_target_properties(AudioCapture PROPERTIES
     WIN32_EXECUTABLE TRUE
+    LINK_FLAGS "/DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll"
 )
 
 # Add compile definitions

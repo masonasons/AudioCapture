@@ -133,6 +133,7 @@ AudioCapture::AudioCapture()
     , m_captureClient(nullptr)
     , m_waveFormat(nullptr)
     , m_isCapturing(false)
+    , m_isPaused(false)
     , m_targetProcessId(0)
     , m_volumeMultiplier(0.5f)  // Default to 50% volume
     , m_isProcessSpecific(false)
@@ -267,14 +268,37 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         return false;
     }
 
+    // Dynamically load ActivateAudioInterfaceAsync to support older Windows versions
+    // This function only exists on Windows 8+ with WinRT
+    typedef HRESULT (STDAPICALLTYPE *ActivateAudioInterfaceAsyncPtr)(
+        LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*, IActivateAudioInterfaceAsyncOperation**);
+
+    HMODULE hMmDevApi = LoadLibraryW(L"Mmdevapi.dll");
+    if (!hMmDevApi) {
+        handler->Release();
+        return false;
+    }
+
+    ActivateAudioInterfaceAsyncPtr pActivateAudioInterfaceAsync =
+        (ActivateAudioInterfaceAsyncPtr)GetProcAddress(hMmDevApi, "ActivateAudioInterfaceAsync");
+
+    if (!pActivateAudioInterfaceAsync) {
+        // Function not available (Windows 7 or earlier) - fail gracefully
+        FreeLibrary(hMmDevApi);
+        handler->Release();
+        return false;
+    }
+
     // Start async activation
     IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    HRESULT hr = ActivateAudioInterfaceAsync(
+    HRESULT hr = pActivateAudioInterfaceAsync(
         deviceId,
         __uuidof(IAudioClient),
         &activateParams,
         handler,
         &asyncOp);
+
+    FreeLibrary(hMmDevApi);
 
     if (FAILED(hr) || !asyncOp) {
         handler->Release();
@@ -551,10 +575,47 @@ void AudioCapture::Stop() {
 
     // Then signal the thread to stop
     m_isCapturing = false;
+    m_isPaused = false;
 
     // Wait for thread to finish
     if (m_captureThread.joinable()) {
         m_captureThread.join();
+    }
+}
+
+void AudioCapture::Pause() {
+    if (!m_isCapturing || m_isPaused) {
+        return;
+    }
+
+    m_isPaused = true;
+
+    // Pause the audio client (stops reading data but keeps the stream open)
+    if (m_audioClient) {
+        m_audioClient->Stop();
+    }
+
+    // Pause passthrough if enabled
+    if (m_passthroughEnabled && m_renderClient) {
+        m_renderClient->Stop();
+    }
+}
+
+void AudioCapture::Resume() {
+    if (!m_isCapturing || !m_isPaused) {
+        return;
+    }
+
+    m_isPaused = false;
+
+    // Resume the audio client
+    if (m_audioClient) {
+        m_audioClient->Start();
+    }
+
+    // Resume passthrough if enabled
+    if (m_passthroughEnabled && m_renderClient) {
+        m_renderClient->Start();
     }
 }
 

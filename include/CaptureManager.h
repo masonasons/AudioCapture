@@ -69,6 +69,12 @@ public:
     // Stop all captures
     void StopAllCaptures();
 
+    // Pause all captures
+    void PauseAllCaptures();
+
+    // Resume all captures
+    void ResumeAllCaptures();
+
     // Get active capture sessions
     std::vector<CaptureSession*> GetActiveSessions();
 

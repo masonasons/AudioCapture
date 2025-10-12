@@ -234,6 +234,26 @@ void CaptureManager::StopAllCaptures() {
     }
 }
 
+void CaptureManager::PauseAllCaptures() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    for (auto& pair : m_sessions) {
+        if (pair.second->capture) {
+            pair.second->capture->Pause();
+        }
+    }
+}
+
+void CaptureManager::ResumeAllCaptures() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    for (auto& pair : m_sessions) {
+        if (pair.second->capture) {
+            pair.second->capture->Resume();
+        }
+    }
+}
+
 std::vector<CaptureSession*> CaptureManager::GetActiveSessions() {
     std::lock_guard<std::mutex> lock(m_mutex);
 

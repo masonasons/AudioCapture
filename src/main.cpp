@@ -25,6 +25,8 @@ HWND g_hRefreshBtn;
 HWND g_hStartBtn;
 HWND g_hStopBtn;
 HWND g_hStopAllBtn;
+HWND g_hPauseAllBtn;
+HWND g_hResumeAllBtn;
 HWND g_hFormatCombo;
 HWND g_hOutputPath;
 HWND g_hBrowseBtn;
@@ -55,6 +57,7 @@ std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
 std::unique_ptr<AudioDeviceEnumerator> g_audioDeviceEnum;
 std::vector<ProcessInfo> g_processes;
+bool g_useWinRT = false;  // Track whether we initialized with WinRT or COM
 
 // Window class name
 const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
@@ -81,18 +84,54 @@ void OnMonitorOnlyCheckboxChanged();
 void PopulateMicrophoneDevices();
 void OnMicrophoneCheckboxChanged();
 
+// Helper to detect Windows version
+bool IsWindows8OrGreater() {
+    typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+    if (!hNtdll) return false;
+
+    RtlGetVersionPtr RtlGetVersion = (RtlGetVersionPtr)GetProcAddress(hNtdll, "RtlGetVersion");
+    if (!RtlGetVersion) return false;
+
+    RTL_OSVERSIONINFOW osvi = { 0 };
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+    if (RtlGetVersion(&osvi) == 0) {
+        // Windows 8 is version 6.2, Windows 10 is 10.0
+        return (osvi.dwMajorVersion > 6) || (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion >= 2);
+    }
+    return false;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_hInst = hInstance;
 
-    // Initialize Windows Runtime (required for ActivateAudioInterfaceAsync)
-    // RoInitialize initializes both COM and WinRT
-    // IMPORTANT: Must use RO_INIT_SINGLETHREADED for ActivateAudioInterfaceAsync to work
-    HRESULT hr = RoInitialize(RO_INIT_SINGLETHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
-        char errMsg[256];
-        sprintf_s(errMsg, "Failed to initialize Windows Runtime: 0x%08X", hr);
-        MessageBoxA(nullptr, errMsg, "Error", MB_OK | MB_ICONERROR);
-        return 0;
+    // Initialize COM/WinRT based on Windows version
+    // Windows 8+ supports WinRT (RoInitialize)
+    // Windows 7 requires traditional COM (CoInitializeEx)
+    HRESULT hr;
+    bool useWinRT = IsWindows8OrGreater();
+    g_useWinRT = useWinRT;  // Store for cleanup later
+
+    if (useWinRT) {
+        // Initialize Windows Runtime (required for ActivateAudioInterfaceAsync on Windows 10+)
+        // RoInitialize initializes both COM and WinRT
+        // IMPORTANT: Must use RO_INIT_SINGLETHREADED for ActivateAudioInterfaceAsync to work
+        hr = RoInitialize(RO_INIT_SINGLETHREADED);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
+            char errMsg[256];
+            sprintf_s(errMsg, "Failed to initialize Windows Runtime: 0x%08X", hr);
+            MessageBoxA(nullptr, errMsg, "Error", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+    } else {
+        // Windows 7 - use traditional COM initialization
+        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
+            char errMsg[256];
+            sprintf_s(errMsg, "Failed to initialize COM: 0x%08X", hr);
+            MessageBoxA(nullptr, errMsg, "Error", MB_OK | MB_ICONERROR);
+            return 0;
+        }
     }
 
     // Initialize common controls
@@ -146,8 +185,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         }
     }
 
-    // Cleanup Windows Runtime
-    RoUninitialize();
+    // Cleanup COM/Windows Runtime
+    if (g_useWinRT) {
+        RoUninitialize();
+    } else {
+        CoUninitialize();
+    }
 
     return 0;
 }
@@ -202,6 +245,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 SetWindowText(g_hStatusText, L"All captures stopped.");
                 SetFocus(g_hProcessList);
             }
+            break;
+
+        case IDC_PAUSE_ALL_BTN:
+            g_captureManager->PauseAllCaptures();
+            SetWindowText(g_hStatusText, L"All captures paused.");
+            UpdateRecordingList();  // Update button states immediately
+            SetFocus(g_hProcessList);
+            break;
+
+        case IDC_RESUME_ALL_BTN:
+            g_captureManager->ResumeAllCaptures();
+            SetWindowText(g_hStatusText, L"All captures resumed.");
+            UpdateRecordingList();  // Update button states immediately
+            SetFocus(g_hProcessList);
             break;
 
         case IDC_BROWSE_BTN:
@@ -262,6 +319,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         SetWindowPos(g_hStartBtn, nullptr, 10, 360, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hStopBtn, nullptr, 120, 360, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hStopAllBtn, nullptr, 230, 360, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hPauseAllBtn, nullptr, 340, 360, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hResumeAllBtn, nullptr, 450, 360, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hRecordingListLabel, nullptr, 10, 400, 200, 20, SWP_NOZORDER);
         SetWindowPos(g_hRecordingList, nullptr, 10, 420, width - 20, height - 470, SWP_NOZORDER);
         SetWindowPos(g_hStatusText, nullptr, 10, height - 40, width - 20, 30, SWP_NOZORDER);
@@ -559,6 +618,22 @@ void InitializeControls(HWND hwnd) {
         WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
         230, 360, 100, 30,
         hwnd, (HMENU)IDC_STOP_ALL_BTN, g_hInst, nullptr
+    );
+
+    // Pause All button (initially hidden)
+    g_hPauseAllBtn = CreateWindow(
+        L"BUTTON", L"Pause All",
+        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
+        340, 360, 100, 30,
+        hwnd, (HMENU)IDC_PAUSE_ALL_BTN, g_hInst, nullptr
+    );
+
+    // Resume All button (initially hidden)
+    g_hResumeAllBtn = CreateWindow(
+        L"BUTTON", L"Resume All",
+        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
+        450, 360, 100, 30,
+        hwnd, (HMENU)IDC_RESUME_ALL_BTN, g_hInst, nullptr
     );
 
     // Recording list label
@@ -1080,13 +1155,38 @@ void UpdateRecordingList() {
             LVIS_SELECTED | LVIS_FOCUSED);
     }
 
-    // Show/enable Stop All button if there are multiple captures
+    // Show/enable Stop All, Pause All, and Resume All buttons if there are multiple captures
     if (sessions.size() >= 2) {
         ShowWindow(g_hStopAllBtn, SW_SHOW);
         EnableWindow(g_hStopAllBtn, TRUE);
+        ShowWindow(g_hPauseAllBtn, SW_SHOW);
+        ShowWindow(g_hResumeAllBtn, SW_SHOW);
+
+        // Check pause state of all sessions to enable/disable buttons intelligently
+        int pausedCount = 0;
+        int resumedCount = 0;
+        for (auto* session : sessions) {
+            if (session->capture) {
+                if (session->capture->IsPaused()) {
+                    pausedCount++;
+                } else {
+                    resumedCount++;
+                }
+            }
+        }
+
+        // Enable/disable buttons based on pause state
+        // If all are paused, disable Pause All button
+        // If all are resumed, disable Resume All button
+        EnableWindow(g_hPauseAllBtn, resumedCount > 0);
+        EnableWindow(g_hResumeAllBtn, pausedCount > 0);
     } else {
         ShowWindow(g_hStopAllBtn, SW_HIDE);
         EnableWindow(g_hStopAllBtn, FALSE);
+        ShowWindow(g_hPauseAllBtn, SW_HIDE);
+        EnableWindow(g_hPauseAllBtn, FALSE);
+        ShowWindow(g_hResumeAllBtn, SW_HIDE);
+        EnableWindow(g_hResumeAllBtn, FALSE);
     }
 }
 
