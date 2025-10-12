@@ -236,14 +236,6 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         }
     }
 
-    // Check for minimum Windows version (Build 20348 = Windows 10 21H2)
-    if (dwMajorVersion < 10 || (dwMajorVersion == 10 && dwBuild < 20348)) {
-        char msg[256];
-        sprintf_s(msg, "Per-process audio requires Windows 10 Build 20348 or later.\nYou have Windows %lu.0 Build %lu.", dwMajorVersion, dwBuild);
-        MessageBoxA(nullptr, msg, "Unsupported Windows Version", MB_OK);
-        return false;
-    }
-
     // Use the virtual device for process loopback (not a physical device)
     LPCWSTR deviceId = VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK;
 
