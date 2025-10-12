@@ -32,6 +32,9 @@ HWND g_hMp3BitrateCombo;
 HWND g_hOpusBitrateCombo;
 HWND g_hMp3BitrateLabel;
 HWND g_hOpusBitrateLabel;
+HWND g_hProcessListLabel;
+HWND g_hOutputPathLabel;
+HWND g_hRecordingListLabel;
 
 std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
@@ -177,14 +180,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int height = rcClient.bottom - rcClient.top;
 
         // Adjust control positions and sizes
-        SetWindowPos(g_hProcessList, nullptr, 10, 10, width - 20, 200, SWP_NOZORDER);
-        SetWindowPos(g_hRefreshBtn, nullptr, 10, 220, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hFormatCombo, nullptr, 120, 220, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPath, nullptr, 10, 255, width - 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, 255, 75, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, 290, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopBtn, nullptr, 120, 290, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingList, nullptr, 10, 330, width - 20, height - 380, SWP_NOZORDER);
+        SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
+        SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
+        SetWindowPos(g_hRefreshBtn, nullptr, 10, 240, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hFormatCombo, nullptr, 120, 240, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hOutputPathLabel, nullptr, 10, 275, 100, 20, SWP_NOZORDER);
+        SetWindowPos(g_hOutputPath, nullptr, 10, 295, width - 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, 295, 75, 25, SWP_NOZORDER);
+        SetWindowPos(g_hStartBtn, nullptr, 10, 330, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStopBtn, nullptr, 120, 330, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingListLabel, nullptr, 10, 370, 200, 20, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingList, nullptr, 10, 390, width - 20, height - 440, SWP_NOZORDER);
         SetWindowPos(g_hStatusText, nullptr, 10, height - 40, width - 20, 30, SWP_NOZORDER);
         return 0;
     }
@@ -207,13 +213,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 void InitializeControls(HWND hwnd) {
+    // Process list label
+    g_hProcessListLabel = CreateWindow(
+        L"STATIC", L"Available Processes:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        10, 10, 200, 20,
+        hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
+    );
+
     // Process list (ListView) - allow multiple selection
     g_hProcessList = CreateWindowEx(
         WS_EX_CLIENTEDGE,
         WC_LISTVIEW,
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT,
-        10, 10, 760, 200,
+        10, 30, 760, 180,
         hwnd,
         (HMENU)IDC_PROCESS_LIST,
         g_hInst,
@@ -239,7 +253,7 @@ void InitializeControls(HWND hwnd) {
     g_hRefreshBtn = CreateWindow(
         L"BUTTON", L"Refresh",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 220, 100, 25,
+        10, 240, 100, 25,
         hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr
     );
 
@@ -247,7 +261,7 @@ void InitializeControls(HWND hwnd) {
     g_hFormatCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-        120, 220, 100, 200,
+        120, 240, 100, 200,
         hwnd, (HMENU)IDC_FORMAT_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"WAV");
@@ -259,7 +273,7 @@ void InitializeControls(HWND hwnd) {
     g_hMp3BitrateLabel = CreateWindow(
         L"STATIC", L"MP3 Bitrate:",
         WS_CHILD | SS_LEFT,
-        230, 223, 80, 20,
+        230, 243, 80, 20,
         hwnd, (HMENU)IDC_MP3_BITRATE_LABEL, g_hInst, nullptr
     );
 
@@ -267,7 +281,7 @@ void InitializeControls(HWND hwnd) {
     g_hMp3BitrateCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        310, 220, 80, 200,
+        310, 240, 80, 200,
         hwnd, (HMENU)IDC_MP3_BITRATE_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"128 kbps");
@@ -280,7 +294,7 @@ void InitializeControls(HWND hwnd) {
     g_hOpusBitrateLabel = CreateWindow(
         L"STATIC", L"Opus Bitrate:",
         WS_CHILD | SS_LEFT,
-        230, 223, 80, 20,
+        230, 243, 80, 20,
         hwnd, (HMENU)IDC_OPUS_BITRATE_LABEL, g_hInst, nullptr
     );
 
@@ -288,7 +302,7 @@ void InitializeControls(HWND hwnd) {
     g_hOpusBitrateCombo = CreateWindow(
         WC_COMBOBOX, L"",
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        310, 220, 80, 200,
+        310, 240, 80, 200,
         hwnd, (HMENU)IDC_OPUS_BITRATE_COMBO, g_hInst, nullptr
     );
     SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"64 kbps");
@@ -298,13 +312,21 @@ void InitializeControls(HWND hwnd) {
     SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"256 kbps");
     SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, 2, 0);  // Default to 128 kbps
 
+    // Output path label
+    g_hOutputPathLabel = CreateWindow(
+        L"STATIC", L"Output Folder:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        10, 275, 100, 20,
+        hwnd, (HMENU)IDC_OUTPUT_PATH_LABEL, g_hInst, nullptr
+    );
+
     // Output path edit
     g_hOutputPath = CreateWindowEx(
         WS_EX_CLIENTEDGE,
         L"EDIT",
         GetDefaultOutputPath().c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
-        10, 255, 680, 25,
+        10, 295, 680, 25,
         hwnd, (HMENU)IDC_OUTPUT_PATH, g_hInst, nullptr
     );
 
@@ -312,7 +334,7 @@ void InitializeControls(HWND hwnd) {
     g_hBrowseBtn = CreateWindow(
         L"BUTTON", L"Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        700, 255, 75, 25,
+        700, 295, 75, 25,
         hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
     );
 
@@ -320,7 +342,7 @@ void InitializeControls(HWND hwnd) {
     g_hStartBtn = CreateWindow(
         L"BUTTON", L"Start Capture",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 290, 100, 30,
+        10, 330, 100, 30,
         hwnd, (HMENU)IDC_START_BTN, g_hInst, nullptr
     );
 
@@ -328,8 +350,16 @@ void InitializeControls(HWND hwnd) {
     g_hStopBtn = CreateWindow(
         L"BUTTON", L"Stop Capture",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        120, 290, 100, 30,
+        120, 330, 100, 30,
         hwnd, (HMENU)IDC_STOP_BTN, g_hInst, nullptr
+    );
+
+    // Recording list label
+    g_hRecordingListLabel = CreateWindow(
+        L"STATIC", L"Active Recordings:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        10, 370, 200, 20,
+        hwnd, (HMENU)IDC_RECORDING_LIST_LABEL, g_hInst, nullptr
     );
 
     // Recording list (ListView)
@@ -338,7 +368,7 @@ void InitializeControls(HWND hwnd) {
         WC_LISTVIEW,
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
-        10, 330, 760, 180,
+        10, 390, 760, 120,
         hwnd,
         (HMENU)IDC_RECORDING_LIST,
         g_hInst,
