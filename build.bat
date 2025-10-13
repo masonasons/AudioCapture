@@ -66,6 +66,14 @@ if errorlevel 1 (
     echo Successfully copied to package\AudioCapture.exe
 )
 
+REM Ensure README.md is in package folder (should be in git, but copy if missing)
+if not exist "package\README.md" (
+    echo Copying README to package folder...
+    if exist "README.md" (
+        copy /Y "README.md" "package\README.md"
+    )
+)
+
 echo.
 echo Libraries are statically linked - no DLLs needed.
 echo.

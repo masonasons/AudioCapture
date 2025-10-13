@@ -3,7 +3,8 @@ build/
 out/
 bin/
 lib/
-package/
+package/*
+!package/README.md
 
 # Visual Studio
 .vs/
