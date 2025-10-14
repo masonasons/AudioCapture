@@ -39,6 +39,8 @@ bool WavFileDestination::Configure(const WAVEFORMATEX* format, const Destination
     // Start the async writer thread
     StartAsyncWriter();
 
+    InitializeSilenceDetection(format, config);
+
     return true;
 }
 

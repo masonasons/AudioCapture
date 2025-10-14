@@ -85,6 +85,8 @@ bool OpusFileDestination::Configure(const WAVEFORMATEX* format, const Destinatio
     // Start the async writer thread
     StartAsyncWriter();
 
+    InitializeSilenceDetection(format, config);
+
     return true;
 }
 

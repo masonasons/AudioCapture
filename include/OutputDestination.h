@@ -42,6 +42,11 @@ struct DestinationConfig {
     // Device-specific settings
     float volumeMultiplier;            ///< Volume adjustment (0.0-2.0, 1.0 = 100%)
 
+    // Silence detection settings (file destinations only)
+    bool skipSilence;                  ///< Skip writing silent audio segments
+    float silenceThreshold;            ///< Amplitude threshold for silence (0.0-1.0, 0.01 = 1%)
+    UINT32 silenceDurationMs;          ///< Minimum silence duration to skip (milliseconds)
+
     /**
      * @brief Default constructor with reasonable defaults
      */
@@ -50,6 +55,9 @@ struct DestinationConfig {
         , bitrate(192000)              // 192 kbps default
         , compressionLevel(5)          // Medium compression for FLAC
         , volumeMultiplier(1.0f)       // 100% volume
+        , skipSilence(false)           // Disabled by default
+        , silenceThreshold(0.01f)      // 1% of max amplitude
+        , silenceDurationMs(1000)      // 1 second minimum
     {}
 };
 
@@ -130,6 +138,25 @@ public:
      */
     virtual std::wstring GetLastError() const { return L""; }
 
+    /**
+     * @brief Pause writing audio data (file destinations only)
+     *
+     * When paused, audio data will still be queued but not written to file.
+     * Use Resume() to continue writing.
+     */
+    void Pause();
+
+    /**
+     * @brief Resume writing audio data after a pause
+     */
+    void Resume();
+
+    /**
+     * @brief Check if the destination is currently paused
+     * @return true if paused, false if not
+     */
+    bool IsPaused() const { return m_isPaused; }
+
 protected:
     /**
      * @brief Subclasses override this to perform the actual write operation
@@ -165,9 +192,26 @@ private:
     std::thread m_writerThread;
     std::atomic<bool> m_writerRunning;
     std::atomic<bool> m_isOpen;
+    std::atomic<bool> m_isPaused;
 
     // Writer thread function
     void WriterThreadFunc();
+
+    // Silence detection state
+    bool m_skipSilence;
+    float m_silenceThreshold;
+    UINT32 m_silenceDurationMs;
+    UINT32 m_silenceDurationSamples;  // Converted from Ms based on format
+    UINT32 m_consecutiveSilentSamples;
+    WAVEFORMATEX* m_format;  // Stored for silence detection calculations
+
+    /**
+     * @brief Detect if an audio buffer contains silence
+     * @param data Audio data buffer
+     * @param size Size in bytes
+     * @return true if buffer is considered silent
+     */
+    bool IsSilent(const BYTE* data, UINT32 size);
 
 protected:
     /**

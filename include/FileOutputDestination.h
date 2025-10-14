@@ -117,6 +117,33 @@ protected:
     }
 
     /**
+     * @brief Initialize silence detection settings from config
+     * @param format Audio format
+     * @param config Destination configuration with silence settings
+     */
+    void InitializeSilenceDetection(const WAVEFORMATEX* format, const DestinationConfig& config) {
+        m_skipSilence = config.skipSilence;
+        m_silenceThreshold = config.silenceThreshold;
+        m_silenceDurationMs = config.silenceDurationMs;
+
+        // Store a copy of the format for silence detection
+        if (m_format) {
+            CoTaskMemFree(m_format);
+            m_format = nullptr;
+        }
+        m_format = CopyFormat(format);
+
+        // Calculate silence duration in samples
+        if (m_format && m_skipSilence) {
+            m_silenceDurationSamples = (m_silenceDurationMs * m_format->nSamplesPerSec) / 1000;
+        } else {
+            m_silenceDurationSamples = 0;
+        }
+
+        m_consecutiveSilentSamples = 0;
+    }
+
+    /**
      * @brief Validate that a file path is not empty
      * @param path File path to validate
      * @return true if valid, false if empty

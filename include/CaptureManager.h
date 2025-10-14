@@ -138,6 +138,16 @@ public:
     void ResumeAll();
 
     /**
+     * @brief Pause only file destinations in all sessions (keeps device output active)
+     */
+    void PauseFileDestinations();
+
+    /**
+     * @brief Resume file destinations in all sessions
+     */
+    void ResumeFileDestinations();
+
+    /**
      * @brief Get count of active sessions
      * @return Number of active capture sessions
      */

@@ -490,6 +490,52 @@ void CaptureManager::ResumeAll() {
     }
 }
 
+void CaptureManager::PauseFileDestinations() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    for (auto& pair : m_sessions) {
+        for (auto& dest : pair.second->destinations) {
+            // Only pause file destinations, not device destinations
+            DestinationType type = dest->GetType();
+            if (type == DestinationType::FileWAV || type == DestinationType::FileMP3 ||
+                type == DestinationType::FileOpus || type == DestinationType::FileFLAC) {
+                dest->Pause();
+            }
+        }
+        // Also pause mixed output if it's a file
+        if (pair.second->mixedDestination) {
+            DestinationType type = pair.second->mixedDestination->GetType();
+            if (type == DestinationType::FileWAV || type == DestinationType::FileMP3 ||
+                type == DestinationType::FileOpus || type == DestinationType::FileFLAC) {
+                pair.second->mixedDestination->Pause();
+            }
+        }
+    }
+}
+
+void CaptureManager::ResumeFileDestinations() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    for (auto& pair : m_sessions) {
+        for (auto& dest : pair.second->destinations) {
+            // Only resume file destinations, not device destinations
+            DestinationType type = dest->GetType();
+            if (type == DestinationType::FileWAV || type == DestinationType::FileMP3 ||
+                type == DestinationType::FileOpus || type == DestinationType::FileFLAC) {
+                dest->Resume();
+            }
+        }
+        // Also resume mixed output if it's a file
+        if (pair.second->mixedDestination) {
+            DestinationType type = pair.second->mixedDestination->GetType();
+            if (type == DestinationType::FileWAV || type == DestinationType::FileMP3 ||
+                type == DestinationType::FileOpus || type == DestinationType::FileFLAC) {
+                pair.second->mixedDestination->Resume();
+            }
+        }
+    }
+}
+
 void CaptureManager::OnAudioData(UINT32 sessionId, const std::wstring& sourceId,
                                  const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
     // CRITICAL OPTIMIZATION: Minimize mutex hold time to prevent callback blocking
