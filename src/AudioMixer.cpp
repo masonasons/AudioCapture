@@ -26,20 +26,64 @@ void AudioMixer::AddAudioData(DWORD sourceId, const BYTE* data, UINT32 size, con
         return;
     }
 
+    // Validate format parameters to prevent crashes
+    if (sourceFormat->nSamplesPerSec == 0 || sourceFormat->nChannels == 0 ||
+        sourceFormat->wBitsPerSample == 0 || sourceFormat->nBlockAlign == 0) {
+        return;  // Invalid format - skip this data
+    }
+
+    // CRITICAL OPTIMIZATION: Check if resampling is needed WITHOUT holding mutex
+    // Resampling is expensive (loops over thousands of samples) and can block audio callbacks
+    bool needsResampling = (sourceFormat->nSamplesPerSec != m_format.nSamplesPerSec ||
+                           sourceFormat->nChannels != m_format.nChannels ||
+                           sourceFormat->wBitsPerSample != m_format.wBitsPerSample);
+
+    // Acquire mutex to get buffer reference (brief lock)
     std::lock_guard<std::mutex> lock(m_mutex);
 
     // Get or create buffer for this source
     AudioBuffer& buffer = m_buffers[sourceId];
 
-    // Check if resampling is needed
-    if (sourceFormat->nSamplesPerSec != m_format.nSamplesPerSec ||
-        sourceFormat->nChannels != m_format.nChannels ||
-        sourceFormat->wBitsPerSample != m_format.wBitsPerSample) {
-        // Resample the audio to match target format
-        std::vector<BYTE> resampledData = ResampleAudio(data, size, sourceFormat);
-        buffer.data.insert(buffer.data.end(), resampledData.begin(), resampledData.end());
-    } else {
-        // No resampling needed, append directly
+    // Store source format on first call for this source (for format change detection)
+    bool isNewSource = (buffer.sourceFormat.nSamplesPerSec == 0);
+    if (isNewSource) {
+        memcpy(&buffer.sourceFormat, sourceFormat, sizeof(WAVEFORMATEX));
+    }
+
+    // CRITICAL: Pre-reserve capacity to avoid reallocation during insert()
+    // Reallocation copies ALL existing data, blocking the mutex and causing choppy audio!
+    // Reserve in 1-second chunks (at 48kHz stereo 32-bit = 384KB per second)
+    const UINT32 RESERVE_CHUNK_SIZE = m_format.nSamplesPerSec * m_format.nBlockAlign;
+    if (buffer.data.capacity() < buffer.data.size() + size + RESERVE_CHUNK_SIZE) {
+        buffer.data.reserve(buffer.data.size() + RESERVE_CHUNK_SIZE);
+    }
+
+    // Perform resampling if needed using PRE-ALLOCATED buffer
+    // This prevents expensive heap allocations on every audio callback
+    if (needsResampling) {
+        // Calculate required buffer size
+        UINT32 sourceBytesPerFrame = sourceFormat->nBlockAlign;
+        UINT32 sourceFrameCount = size / sourceBytesPerFrame;
+        double ratio = (double)m_format.nSamplesPerSec / (double)sourceFormat->nSamplesPerSec;
+        UINT32 targetFrameCount = (UINT32)(sourceFrameCount * ratio);
+        UINT32 targetBytesPerFrame = m_format.nBlockAlign;
+        UINT32 targetSize = targetFrameCount * targetBytesPerFrame;
+
+        // Resize ONCE if needed (amortized cost, not per-callback)
+        if (buffer.resampleBuffer.size() < targetSize) {
+            buffer.resampleBuffer.resize(targetSize);
+        }
+
+        // Resample into the pre-allocated buffer
+        if (!ResampleAudioInPlace(data, size, sourceFormat, buffer.resampleBuffer.data(), targetSize)) {
+            return;  // Resampling failed - skip this data
+        }
+
+        // Append resampled data - now guaranteed not to reallocate!
+        buffer.data.insert(buffer.data.end(), buffer.resampleBuffer.data(), buffer.resampleBuffer.data() + targetSize);
+    }
+    else {
+        // No resampling needed - append original data directly - no reallocation!
         buffer.data.insert(buffer.data.end(), data, data + size);
     }
 }
@@ -49,75 +93,163 @@ bool AudioMixer::GetMixedAudio(std::vector<BYTE>& outBuffer) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // CRITICAL OPTIMIZATION: Minimize mutex hold time
+    // We'll acquire mutex ONLY to snapshot buffer state, then release it
+    // before doing expensive operations (mixing, memory allocation, etc.)
 
-    if (m_buffers.empty()) {
-        return false;
-    }
+    // Snapshot of buffer data for mixing
+    struct BufferSnapshot {
+        DWORD sourceId;
+        const BYTE* dataPtr;
+        UINT32 availableBytes;
+    };
+    std::vector<BufferSnapshot> snapshots;
+    UINT32 bytesToMix = 0;
+    UINT32 frameCount = 0;
+    UINT32 bytesPerFrame = 0;
 
-    // Find the minimum amount of data available across all sources
-    UINT32 minDataAvailable = UINT32_MAX;
-    for (const auto& pair : m_buffers) {
-        UINT32 available = static_cast<UINT32>(pair.second.data.size()) - pair.second.readPosition;
-        if (available < minDataAvailable) {
-            minDataAvailable = available;
+    // Phase 1: BRIEF mutex lock to snapshot buffer state
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (m_buffers.empty()) {
+            return false;
+        }
+
+        // Validate format before proceeding
+        if (m_format.nBlockAlign == 0) {
+            return false;
+        }
+
+        bytesPerFrame = m_format.nBlockAlign;
+
+        // STRICT SYNC with minimum buffer requirement
+        // Wait for ALL sources to have at least some minimum amount of data
+        // This ensures synchronization while preventing buffer underruns
+        UINT32 minDataAvailable = UINT32_MAX;
+
+        // Find the minimum available data across all sources
+        // We'll mix whatever is available from ALL sources to maintain sync
+        for (const auto& pair : m_buffers) {
+            UINT32 available = 0;
+
+            // Calculate available data for this source
+            if (pair.second.data.size() > pair.second.readPosition) {
+                available = static_cast<UINT32>(pair.second.data.size()) - pair.second.readPosition;
+            }
+
+            // Track minimum across all sources
+            if (available < minDataAvailable) {
+                minDataAvailable = available;
+            }
+        }
+
+        // If ANY source has no data, return false - wait for sync
+        if (minDataAvailable == 0) {
+            return false;  // At least one source has no data - wait
+        }
+
+        // Calculate frame count
+        frameCount = minDataAvailable / bytesPerFrame;
+        if (frameCount == 0) {
+            return false;
+        }
+
+        bytesToMix = frameCount * bytesPerFrame;
+
+        // Snapshot buffer pointers for sources that have enough data
+        // Sources without enough data will be padded with silence during mixing
+        snapshots.reserve(m_buffers.size());
+        for (auto& pair : m_buffers) {
+            UINT32 available = 0;
+            if (pair.second.data.size() > pair.second.readPosition) {
+                available = static_cast<UINT32>(pair.second.data.size()) - pair.second.readPosition;
+            }
+
+            if (available >= bytesToMix) {
+                // This source has enough data
+                BufferSnapshot snapshot;
+                snapshot.sourceId = pair.first;
+                snapshot.dataPtr = pair.second.data.data() + pair.second.readPosition;
+                snapshot.availableBytes = available;
+                snapshots.push_back(snapshot);
+            } else {
+                // This source doesn't have enough data yet - will be padded with silence
+                BufferSnapshot snapshot;
+                snapshot.sourceId = pair.first;
+                snapshot.dataPtr = nullptr;  // nullptr indicates silence padding needed
+                snapshot.availableBytes = 0;
+                snapshots.push_back(snapshot);
+            }
+        }
+
+        if (snapshots.empty()) {
+            return false;
         }
     }
+    // CRITICAL: Mutex is now released - audio callbacks can proceed!
 
-    if (minDataAvailable == 0 || minDataAvailable == UINT32_MAX) {
-        return false;
+    // Phase 2: Perform expensive operations WITHOUT holding mutex
+
+    // OPTIMIZATION: Only resize if buffer is too small (reuse existing capacity)
+    // This avoids repeated allocations on every GetMixedAudio() call
+    if (outBuffer.capacity() < bytesToMix) {
+        outBuffer.reserve(bytesToMix + (m_format.nSamplesPerSec * m_format.nBlockAlign));  // Reserve extra
     }
-
-    // Calculate frame count
-    UINT32 bytesPerFrame = m_format.nBlockAlign;
-    UINT32 frameCount = minDataAvailable / bytesPerFrame;
-
-    if (frameCount == 0) {
-        return false;
-    }
-
-    UINT32 bytesToMix = frameCount * bytesPerFrame;
-
-    // Prepare output buffer
     outBuffer.resize(bytesToMix);
 
-    // If only one source, just copy the data
-    if (m_buffers.size() == 1) {
-        const AudioBuffer& buffer = m_buffers.begin()->second;
-        memcpy(outBuffer.data(), buffer.data.data() + buffer.readPosition, bytesToMix);
-        m_buffers.begin()->second.readPosition += bytesToMix;
+    // Mix the audio data
+    if (snapshots.size() == 1) {
+        // Single source
+        if (snapshots[0].dataPtr) {
+            // Has data - just copy
+            memcpy(outBuffer.data(), snapshots[0].dataPtr, bytesToMix);
+        } else {
+            // No data - fill with silence
+            memset(outBuffer.data(), 0, bytesToMix);
+        }
     }
     else {
-        // Multiple sources - need to mix
-        std::vector<const BYTE*> sources;
-        for (auto& pair : m_buffers) {
-            sources.push_back(pair.second.data.data() + pair.second.readPosition);
+        // Multiple sources - mix them (MixSamples handles nullptr for silence)
+        std::vector<const BYTE*> sourcePtrs;
+        sourcePtrs.reserve(snapshots.size());
+        for (const auto& snapshot : snapshots) {
+            sourcePtrs.push_back(snapshot.dataPtr);  // nullptr means silence
         }
-
-        MixSamples(sources, outBuffer.data(), frameCount);
-
-        // Update read positions for all sources
-        for (auto& pair : m_buffers) {
-            pair.second.readPosition += bytesToMix;
-        }
+        MixSamples(sourcePtrs, outBuffer.data(), frameCount);
     }
 
-    // Clean up consumed data
-    for (auto it = m_buffers.begin(); it != m_buffers.end(); ) {
-        AudioBuffer& buffer = it->second;
+    // Phase 3: BRIEF mutex lock to update read positions and cleanup
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-        // If we've read everything, erase old data
-        if (buffer.readPosition >= buffer.data.size()) {
-            buffer.data.clear();
-            buffer.readPosition = 0;
-        }
-        // If we've read a significant amount, compact the buffer
-        else if (buffer.readPosition > static_cast<UINT32>(48000 * m_format.nBlockAlign)) { // Keep last second
-            buffer.data.erase(buffer.data.begin(), buffer.data.begin() + buffer.readPosition);
-            buffer.readPosition = 0;
+        // Update read positions ONLY for sources that had data (dataPtr != nullptr)
+        for (const auto& snapshot : snapshots) {
+            if (snapshot.dataPtr) {  // Only update if we actually read data
+                auto it = m_buffers.find(snapshot.sourceId);
+                if (it != m_buffers.end()) {
+                    it->second.readPosition += bytesToMix;
+                }
+            }
         }
 
-        ++it;
+        // Clean up consumed data
+        for (auto it = m_buffers.begin(); it != m_buffers.end(); ) {
+            AudioBuffer& buffer = it->second;
+
+            // If we've read everything, erase old data
+            if (buffer.readPosition >= buffer.data.size()) {
+                buffer.data.clear();
+                buffer.readPosition = 0;
+            }
+            // If we've read a significant amount, compact the buffer
+            else if (buffer.readPosition > static_cast<UINT32>(48000 * m_format.nBlockAlign)) {
+                buffer.data.erase(buffer.data.begin(), buffer.data.begin() + buffer.readPosition);
+                buffer.readPosition = 0;
+            }
+
+            ++it;
+        }
     }
 
     return true;
@@ -140,8 +272,10 @@ void AudioMixer::MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest,
             int32_t sum = 0;
 
             for (const BYTE* source : sources) {
-                const int16_t* sourceSamples = reinterpret_cast<const int16_t*>(source);
-                sum += sourceSamples[i];
+                if (source) {  // Skip nullptr sources (silence padding)
+                    const int16_t* sourceSamples = reinterpret_cast<const int16_t*>(source);
+                    sum += sourceSamples[i];
+                }
             }
 
             // Clamp to 16-bit range
@@ -160,8 +294,10 @@ void AudioMixer::MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest,
             float sum = 0.0f;
 
             for (const BYTE* source : sources) {
-                const float* sourceSamples = reinterpret_cast<const float*>(source);
-                sum += sourceSamples[i];
+                if (source) {  // Skip nullptr sources (silence padding)
+                    const float* sourceSamples = reinterpret_cast<const float*>(source);
+                    sum += sourceSamples[i];
+                }
             }
 
             // Clamp to float range [-1.0, 1.0]
@@ -173,12 +309,22 @@ void AudioMixer::MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest,
     }
 }
 
+void AudioMixer::RemoveSource(DWORD sourceId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_buffers.erase(sourceId);
+}
+
 void AudioMixer::Clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_buffers.clear();
 }
 
-std::vector<BYTE> AudioMixer::ResampleAudio(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat) {
+bool AudioMixer::ResampleAudioInPlace(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat,
+                                      BYTE* destBuffer, UINT32 destSize) {
+    if (!data || !destBuffer || !sourceFormat) {
+        return false;
+    }
+
     // Calculate number of frames in source data
     UINT32 sourceBytesPerFrame = sourceFormat->nBlockAlign;
     UINT32 sourceFrameCount = size / sourceBytesPerFrame;
@@ -191,12 +337,15 @@ std::vector<BYTE> AudioMixer::ResampleAudio(const BYTE* data, UINT32 size, const
     UINT32 targetBytesPerFrame = m_format.nBlockAlign;
     UINT32 targetSize = targetFrameCount * targetBytesPerFrame;
 
-    std::vector<BYTE> resampledData(targetSize);
+    // Verify destination buffer is large enough
+    if (destSize < targetSize) {
+        return false;
+    }
 
     // Only support 32-bit float for now (most common for WASAPI)
     if (sourceFormat->wBitsPerSample == 32 && m_format.wBitsPerSample == 32) {
         const float* sourceSamples = reinterpret_cast<const float*>(data);
-        float* targetSamples = reinterpret_cast<float*>(resampledData.data());
+        float* targetSamples = reinterpret_cast<float*>(destBuffer);
 
         UINT32 sourceChannels = sourceFormat->nChannels;
         UINT32 targetChannels = m_format.nChannels;
@@ -225,7 +374,7 @@ std::vector<BYTE> AudioMixer::ResampleAudio(const BYTE* data, UINT32 size, const
     else if (sourceFormat->wBitsPerSample == 16 && m_format.wBitsPerSample == 16) {
         // 16-bit PCM resampling
         const int16_t* sourceSamples = reinterpret_cast<const int16_t*>(data);
-        int16_t* targetSamples = reinterpret_cast<int16_t*>(resampledData.data());
+        int16_t* targetSamples = reinterpret_cast<int16_t*>(destBuffer);
 
         UINT32 sourceChannels = sourceFormat->nChannels;
         UINT32 targetChannels = m_format.nChannels;
@@ -248,9 +397,9 @@ std::vector<BYTE> AudioMixer::ResampleAudio(const BYTE* data, UINT32 size, const
         }
     }
     else {
-        // Unsupported format combination - just copy without resampling (fallback)
-        resampledData.assign(data, data + size);
+        // Unsupported format combination - return false to indicate failure
+        return false;
     }
 
-    return resampledData;
+    return true;
 }

@@ -30,9 +30,8 @@ std::vector<ProcessInfo> ProcessEnumerator::GetAllProcesses() {
             info.processId = pe32.th32ProcessID;
             info.processName = pe32.szExeFile;
             info.executablePath = GetProcessPath(pe32.th32ProcessID);
-            // Don't fetch window title and audio status during enumeration - too slow!
-            // These will be fetched on-demand when displaying
-            info.windowTitle = L"";
+            // Fetch window title during enumeration for processes with windows
+            info.windowTitle = GetWindowTitle(pe32.th32ProcessID);
             info.hasActiveAudio = false;
 
             // Skip system processes

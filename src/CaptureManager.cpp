@@ -1,226 +1,460 @@
 #include "CaptureManager.h"
+#include "ProcessInputSource.h"
+#include "InputDeviceSource.h"
+#include "SystemAudioInputSource.h"
+#include "WavFileDestination.h"
+#include "Mp3FileDestination.h"
+#include "OpusFileDestination.h"
+#include "FlacFileDestination.h"
+#include "DeviceOutputDestination.h"
 #include <algorithm>
-#include <chrono>
 
 CaptureManager::CaptureManager()
-    : m_mixedRecordingEnabled(false), m_mixerThreadRunning(false) {
+    : m_nextSessionId(1) {
 }
 
 CaptureManager::~CaptureManager() {
-    DisableMixedRecording();
-    StopAllCaptures();
+    StopAll();
 }
 
-bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processName,
-                                  const std::wstring& outputPath, AudioFormat format,
-                                  UINT32 bitrate, bool skipSilence,
-                                  const std::wstring& passthroughDeviceId,
-                                  bool monitorOnly) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+// ========================================
+// New API Implementation
+// ========================================
 
-    // Check if already capturing this process
-    if (m_sessions.find(processId) != m_sessions.end()) {
-        return false;
-    }
-
-    // Create new session
-    auto session = std::make_unique<CaptureSession>();
-    session->processId = processId;
-    session->processName = processName;
-    session->outputFile = outputPath;
-    session->format = format;
-    session->isActive = false;
-    session->bytesWritten = 0;
-    session->skipSilence = skipSilence;
-    session->monitorOnly = monitorOnly;
-
-    // Create audio capture
-    session->capture = std::make_unique<AudioCapture>();
-    if (!session->capture->Initialize(processId)) {
-        return false;
-    }
-
-    // Enable passthrough if device ID is provided
-    if (!passthroughDeviceId.empty()) {
-        if (!session->capture->EnablePassthrough(passthroughDeviceId)) {
-            // Passthrough failed, but we can still continue with recording only
-            // Could add a warning here if needed
-        }
-    }
-
-    // Create appropriate encoder (skip if monitor-only mode)
-    const WAVEFORMATEX* waveFormat = session->capture->GetFormat();
-    bool encoderReady = monitorOnly; // If monitor-only, skip encoder setup
-
-    if (!monitorOnly) {
-        switch (format) {
-        case AudioFormat::WAV:
-            session->wavWriter = std::make_unique<WavWriter>();
-            encoderReady = session->wavWriter->Open(outputPath, waveFormat);
-            break;
-
-        case AudioFormat::MP3:
-            session->mp3Encoder = std::make_unique<Mp3Encoder>();
-            // Use provided bitrate or default to 192000 (192 kbps)
-            encoderReady = session->mp3Encoder->Open(outputPath, waveFormat,
-                                                      bitrate > 0 ? bitrate : 192000);
-            break;
-
-        case AudioFormat::OPUS:
-            session->opusEncoder = std::make_unique<OpusEncoder>();
-            // Use provided bitrate or default to 128000 (128 kbps)
-            encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
-                                                       bitrate > 0 ? bitrate : 128000);
-            break;
-
-        case AudioFormat::FLAC:
-            session->flacEncoder = std::make_unique<FlacEncoder>();
-            // Use bitrate as compression level (0-8), default to 5
-            encoderReady = session->flacEncoder->Open(outputPath, waveFormat,
-                                                       bitrate > 0 ? std::min(bitrate, 8u) : 5);
-            break;
-        }
-
-        if (!encoderReady) {
-            return false;
-        }
-    }
-
-    // Set audio data callback
-    session->capture->SetDataCallback([this, processId](const BYTE* data, UINT32 size) {
-        OnAudioData(processId, data, size);
-    });
-
-    // Start capture
-    if (!session->capture->Start()) {
-        return false;
-    }
-
-    session->isActive = true;
-    m_sessions[processId] = std::move(session);
-
-    return true;
+UINT32 CaptureManager::GenerateSessionId() {
+    return m_nextSessionId.fetch_add(1);
 }
 
-bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring& deviceName,
-                                            const std::wstring& deviceId, bool isInputDevice,
-                                            const std::wstring& outputPath, AudioFormat format,
-                                            UINT32 bitrate, bool skipSilence, bool monitorOnly) {
+UINT32 CaptureManager::StartCaptureSession(const CaptureConfig& config) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    // Check if already capturing this session
-    if (m_sessions.find(sessionId) != m_sessions.end()) {
-        return false;
+    // Validate configuration
+    if (config.sources.empty()) {
+        return 0;  // Need at least one source
     }
 
-    // Create new session
-    auto session = std::make_unique<CaptureSession>();
-    session->processId = sessionId;
-    session->processName = deviceName;
-    session->outputFile = outputPath;
-    session->format = format;
-    session->isActive = false;
-    session->bytesWritten = 0;
-    session->skipSilence = skipSilence;
-    session->monitorOnly = monitorOnly;
+    // Create new internal session
+    auto session = std::make_unique<CaptureSessionInternal>();
+    session->sessionId = GenerateSessionId();
+    session->sources = config.sources;
+    session->destinations = config.destinations;
+    session->routingRules = config.routingRules;
+    session->isPaused = false;
+    session->enableMixedOutput = config.enableMixedOutput;
 
-    // Create audio capture for device
-    session->capture = std::make_unique<AudioCapture>();
-    if (!session->capture->InitializeFromDevice(deviceId, isInputDevice)) {
-        return false;
-    }
+    UINT32 sessionId = session->sessionId;
 
-    // Create appropriate encoder (skip if monitor-only mode)
-    const WAVEFORMATEX* waveFormat = session->capture->GetFormat();
-    bool encoderReady = monitorOnly; // If monitor-only, skip encoder setup
+    // Set up callbacks and START sources first (needed to get format for mixer)
+    for (auto& source : session->sources) {
+        InputSourceMetadata metadata = source->GetMetadata();
+        std::wstring sourceId = metadata.id;
 
-    if (!monitorOnly) {
-        switch (format) {
-        case AudioFormat::WAV:
-            session->wavWriter = std::make_unique<WavWriter>();
-            encoderReady = session->wavWriter->Open(outputPath, waveFormat);
-            break;
-
-        case AudioFormat::MP3:
-            session->mp3Encoder = std::make_unique<Mp3Encoder>();
-            encoderReady = session->mp3Encoder->Open(outputPath, waveFormat,
-                                                      bitrate > 0 ? bitrate : 192000);
-            break;
-
-        case AudioFormat::OPUS:
-            session->opusEncoder = std::make_unique<OpusEncoder>();
-            encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
-                                                       bitrate > 0 ? bitrate : 128000);
-            break;
-
-        case AudioFormat::FLAC:
-            session->flacEncoder = std::make_unique<FlacEncoder>();
-            encoderReady = session->flacEncoder->Open(outputPath, waveFormat,
-                                                       bitrate > 0 ? std::min(bitrate, 8u) : 5);
-            break;
+        // Start capturing from this source FIRST (needed to get format)
+        if (!source->StartCapture()) {
+            // Failed to start capture from this source
+            // Clean up and return failure
+            for (auto& src : session->sources) {
+                src->StopCapture();
+            }
+            return 0;
         }
 
-        if (!encoderReady) {
-            return false;
+        // Cache format pointer to avoid mutex + linear search in audio callbacks
+        // This is THE critical optimization - callbacks run thousands of times per second!
+        const WAVEFORMATEX* cachedFormat = source->GetFormat();
+
+        // Set up callback with cached format - no mutex, no search!
+        source->SetDataCallback([this, sessionId, sourceId, cachedFormat](const BYTE* data, UINT32 size) {
+            if (cachedFormat) {
+                OnAudioData(sessionId, sourceId, data, size, cachedFormat);
+            }
+        });
+    }
+
+    // Set up mixer if needed:
+    // 1. Explicit mixed output requested (enableMixedOutput = true)
+    // 2. Multiple sources with no routing rules (implicit mixing needed)
+    bool needsMixer = config.enableMixedOutput ||
+                     (config.sources.size() > 1 && config.routingRules.empty());
+
+    if (needsMixer) {
+        // Get format from first source (now valid after StartCapture)
+        const WAVEFORMATEX* format = nullptr;
+        if (!config.sources.empty()) {
+            format = config.sources[0]->GetFormat();
+        }
+
+        if (format) {
+            // Create mixer
+            session->mixer = std::make_unique<AudioMixer>();
+            if (!session->mixer->Initialize(format)) {
+                // Clean up and return failure
+                for (auto& src : session->sources) {
+                    src->StopCapture();
+                }
+                return 0;  // Failed to initialize mixer
+            }
+
+            // Set the first source as the mixer driver (the one that calls GetMixedAudio)
+            if (!session->sources.empty()) {
+                session->mixerDriverSourceId = session->sources[0]->GetMetadata().id;
+            }
+
+            // If explicit mixed output requested, create dedicated mixed destination
+            if (config.enableMixedOutput && !config.mixedOutputPath.empty()) {
+                DestinationConfig destConfig;
+                destConfig.outputPath = config.mixedOutputPath;
+                destConfig.bitrate = config.mixedOutputBitrate;
+
+                switch (config.mixedOutputFormat) {
+                case AudioFormat::WAV: {
+                    auto wavDest = std::make_unique<WavFileDestination>();
+                    if (wavDest->Configure(format, destConfig)) {
+                        session->mixedDestination = std::move(wavDest);
+                    }
+                    break;
+                }
+                case AudioFormat::MP3: {
+                    auto mp3Dest = std::make_unique<Mp3FileDestination>();
+                    if (mp3Dest->Configure(format, destConfig)) {
+                        session->mixedDestination = std::move(mp3Dest);
+                    }
+                    break;
+                }
+                case AudioFormat::OPUS: {
+                    auto opusDest = std::make_unique<OpusFileDestination>();
+                    if (opusDest->Configure(format, destConfig)) {
+                        session->mixedDestination = std::move(opusDest);
+                    }
+                    break;
+                }
+                case AudioFormat::FLAC: {
+                    auto flacDest = std::make_unique<FlacFileDestination>();
+                    if (flacDest->Configure(format, destConfig)) {
+                        session->mixedDestination = std::move(flacDest);
+                    }
+                    break;
+                }
+                }
+
+                if (!session->mixedDestination) {
+                    // Clean up and return failure
+                    for (auto& src : session->sources) {
+                        src->StopCapture();
+                    }
+                    return 0;  // Failed to create mixed destination
+                }
+            }
         }
     }
 
-    // Set audio data callback
-    session->capture->SetDataCallback([this, sessionId](const BYTE* data, UINT32 size) {
-        OnAudioData(sessionId, data, size);
-    });
-
-    // Start capture
-    if (!session->capture->Start()) {
-        return false;
-    }
-
-    session->isActive = true;
+    // Store session
     m_sessions[sessionId] = std::move(session);
 
-    return true;
+    return sessionId;
 }
 
-bool CaptureManager::StopCapture(DWORD processId) {
+bool CaptureManager::StopCaptureSession(UINT32 sessionId) {
     // Extract the session from the map (with mutex held)
-    std::unique_ptr<CaptureSession> session;
+    std::unique_ptr<CaptureSessionInternal> session;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_sessions.find(processId);
+        auto it = m_sessions.find(sessionId);
         if (it == m_sessions.end()) {
             return false;
         }
+        // Mark session as invalid BEFORE removing from map
+        // This allows callbacks to detect session destruction via atomic flag
+        it->second->isValid.store(false, std::memory_order_release);
+
         // Move the session out of the map
         session = std::move(it->second);
         m_sessions.erase(it);
     }
 
-    // Stop capture WITHOUT holding the mutex (avoids deadlock with OnAudioData)
-    if (session->capture) {
-        session->capture->Stop();
+    // Stop all sources WITHOUT holding the mutex (avoids deadlock with callbacks)
+    for (auto& source : session->sources) {
+        source->StopCapture();
     }
 
-    // Close encoders
-    if (session->wavWriter) {
-        session->wavWriter->Close();
+    // Close all destinations
+    for (auto& destination : session->destinations) {
+        destination->Close();
     }
-    if (session->mp3Encoder) {
-        session->mp3Encoder->Close();
-    }
-    if (session->opusEncoder) {
-        session->opusEncoder->Close();
-    }
-    if (session->flacEncoder) {
-        session->flacEncoder->Close();
+
+    // Close mixed destination if present
+    if (session->mixedDestination) {
+        session->mixedDestination->Close();
     }
 
     // Session will be automatically destroyed when it goes out of scope
     return true;
 }
 
-void CaptureManager::StopAllCaptures() {
+void CaptureManager::PauseSession(UINT32 sessionId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_sessions.find(sessionId);
+    if (it != m_sessions.end()) {
+        it->second->isPaused = true;
+        for (auto& source : it->second->sources) {
+            source->Pause();
+        }
+    }
+}
+
+void CaptureManager::ResumeSession(UINT32 sessionId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_sessions.find(sessionId);
+    if (it != m_sessions.end()) {
+        it->second->isPaused = false;
+        for (auto& source : it->second->sources) {
+            source->Resume();
+        }
+    }
+}
+
+bool CaptureManager::AddInputSource(UINT32 sessionId, InputSourcePtr source) {
+    if (!source) {
+        return false;
+    }
+
+    InputSourceMetadata metadata = source->GetMetadata();
+    std::wstring sourceId = metadata.id;
+
+    // CRITICAL FIX: Start capturing BEFORE acquiring mutex to avoid blocking audio callbacks
+    // StartCapture() can take 10-100ms (WASAPI initialization, buffer allocation, etc.)
+    // If we hold the mutex during this, ALL audio callbacks will be blocked causing choppy audio!
+    if (!source->StartCapture()) {
+        return false;  // Failed to start capture
+    }
+
+    // Brief delay to allow WASAPI to initialize format
+    Sleep(10);
+
+    // Now add source to session WITH mutex held (brief operation)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_sessions.find(sessionId);
+        if (it == m_sessions.end()) {
+            // Session doesn't exist - stop the source and return
+            source->StopCapture();
+            return false;
+        }
+
+        // Add source to session's source list
+        it->second->sources.push_back(source);
+    }
+
+    // THE FIX: Cache the format pointer in the callback capture to avoid mutex + linear search
+    // The old code locked mutex and searched through ALL sources on EVERY audio callback!
+    // That's why adding sources made everything choppy - O(n) search in hot path.
+    const WAVEFORMATEX* cachedFormat = source->GetFormat();
+
+    // Set up callback with cached format pointer
+    source->SetDataCallback([this, sessionId, sourceId, cachedFormat](const BYTE* data, UINT32 size) {
+        // No mutex needed! No search needed! Just use the cached format pointer.
+        if (cachedFormat) {
+            OnAudioData(sessionId, sourceId, data, size, cachedFormat);
+        }
+    });
+
+    // Post-initialization: validate format and setup mixer if needed
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_sessions.find(sessionId);
+        if (it == m_sessions.end()) {
+            // Session was stopped - stop the source
+            source->StopCapture();
+            return false;
+        }
+
+        const WAVEFORMATEX* sourceFormat = source->GetFormat();
+
+        // CRITICAL FIX: Create mixer if this is the 2nd source and no mixer exists yet!
+        // When starting with 1 source + device output, no mixer is created
+        // When adding a 2nd source, we need to create mixer to avoid audio conflicts
+        if (!it->second->mixer && it->second->sources.size() >= 2 && it->second->routingRules.empty()) {
+            // Get format from first source for mixer initialization
+            const WAVEFORMATEX* mixerFormat = nullptr;
+            if (!it->second->sources.empty()) {
+                mixerFormat = it->second->sources[0]->GetFormat();
+            }
+
+            if (mixerFormat) {
+                // Create mixer now!
+                it->second->mixer = std::make_unique<AudioMixer>();
+                if (it->second->mixer->Initialize(mixerFormat)) {
+                    // Set the first source as the mixer driver (the one that calls GetMixedAudio)
+                    if (!it->second->sources.empty()) {
+                        it->second->mixerDriverSourceId = it->second->sources[0]->GetMetadata().id;
+                    }
+
+                    // Initialize buffers for ALL existing sources
+                    for (const auto& existingSource : it->second->sources) {
+                        std::wstring existingId = existingSource->GetMetadata().id;
+                        DWORD mixerSourceId = std::hash<std::wstring>{}(existingId);
+                        const WAVEFORMATEX* fmt = existingSource->GetFormat();
+                        if (fmt) {
+                            std::vector<BYTE> silentBuffer(fmt->nBlockAlign, 0);
+                            it->second->mixer->AddAudioData(mixerSourceId, silentBuffer.data(),
+                                                           fmt->nBlockAlign, fmt);
+                        }
+                    }
+                } else {
+                    // Failed to create mixer - remove the source and fail
+                    it->second->mixer.reset();
+                    auto& sources = it->second->sources;
+                    auto sourceIt = std::find_if(sources.begin(), sources.end(),
+                        [&sourceId](const InputSourcePtr& src) {
+                            return src->GetMetadata().id == sourceId;
+                        });
+                    if (sourceIt != sources.end()) {
+                        sources.erase(sourceIt);
+                    }
+                    source->StopCapture();
+                    return false;
+                }
+            }
+        }
+
+        // Check for format mismatches if mixer exists
+        if (sourceFormat && it->second->mixer) {
+            // Get mixer format
+            const WAVEFORMATEX* mixerFormat = &it->second->mixer->GetFormat();
+
+            // Log format mismatch warning
+            if (sourceFormat->nSamplesPerSec != mixerFormat->nSamplesPerSec ||
+                sourceFormat->nChannels != mixerFormat->nChannels ||
+                sourceFormat->wBitsPerSample != mixerFormat->wBitsPerSample) {
+
+                // FORMAT MISMATCH DETECTED!
+                OutputDebugStringW(L"[AudioCapture] WARNING: Format mismatch detected!\n");
+
+                wchar_t buffer[512];
+                swprintf_s(buffer, L"  Source: %u Hz, %u ch, %u bits\n  Mixer:  %u Hz, %u ch, %u bits\n",
+                    sourceFormat->nSamplesPerSec, sourceFormat->nChannels, sourceFormat->wBitsPerSample,
+                    mixerFormat->nSamplesPerSec, mixerFormat->nChannels, mixerFormat->wBitsPerSample);
+                OutputDebugStringW(buffer);
+            }
+        }
+
+        // If this session has a mixer, pre-register the source buffer
+        if (it->second->mixer && sourceFormat) {
+            DWORD mixerSourceId = std::hash<std::wstring>{}(sourceId);
+            // Add a tiny amount of silence to initialize the buffer
+            std::vector<BYTE> silentBuffer(sourceFormat->nBlockAlign, 0);
+            it->second->mixer->AddAudioData(mixerSourceId, silentBuffer.data(),
+                                           sourceFormat->nBlockAlign, sourceFormat);
+        }
+    }
+
+    return true;
+}
+
+bool CaptureManager::RemoveInputSource(UINT32 sessionId, const std::wstring& sourceId) {
+    // Extract the source from the session WITHOUT holding the mutex during StopCapture
+    // to avoid deadlock with audio callbacks
+    InputSourcePtr sourceToRemove;
+    AudioMixer* mixer = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto it = m_sessions.find(sessionId);
+        if (it == m_sessions.end()) {
+            return false;
+        }
+
+        auto& sources = it->second->sources;
+        auto sourceIt = std::find_if(sources.begin(), sources.end(),
+            [&sourceId](const InputSourcePtr& source) {
+                return source->GetMetadata().id == sourceId;
+            });
+
+        if (sourceIt == sources.end()) {
+            return false;
+        }
+
+        // Get mixer reference if present
+        if (it->second->mixer) {
+            mixer = it->second->mixer.get();
+        }
+
+        // Move the source out of the list (keeps it alive)
+        sourceToRemove = *sourceIt;
+        sources.erase(sourceIt);
+    }
+
+    // Remove from mixer if present (before stopping to drain remaining audio)
+    if (mixer && sourceToRemove) {
+        DWORD mixerSourceId = std::hash<std::wstring>{}(sourceId);
+        mixer->RemoveSource(mixerSourceId);
+    }
+
+    // Stop the source WITHOUT holding the mutex
+    // This allows audio callbacks to complete gracefully
+    if (sourceToRemove) {
+        sourceToRemove->StopCapture();
+    }
+
+    return true;
+}
+
+bool CaptureManager::AddOutputDestination(UINT32 sessionId, OutputDestinationPtr destination) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_sessions.find(sessionId);
+    if (it == m_sessions.end()) {
+        return false;
+    }
+
+    it->second->destinations.push_back(std::move(destination));
+    return true;
+}
+
+bool CaptureManager::RemoveOutputDestination(UINT32 sessionId, const std::wstring& destinationId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_sessions.find(sessionId);
+    if (it == m_sessions.end()) {
+        return false;
+    }
+
+    auto& destinations = it->second->destinations;
+    auto destIt = std::find_if(destinations.begin(), destinations.end(),
+        [&destinationId](const OutputDestinationPtr& dest) {
+            return dest->GetName() == destinationId;
+        });
+
+    if (destIt == destinations.end()) {
+        return false;
+    }
+
+    // Close the destination
+    (*destIt)->Close();
+
+    // Remove from list
+    destinations.erase(destIt);
+    return true;
+}
+
+bool CaptureManager::AddRoutingRule(UINT32 sessionId, const RoutingRule& rule) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_sessions.find(sessionId);
+    if (it == m_sessions.end()) {
+        return false;
+    }
+
+    it->second->routingRules.push_back(rule);
+    return true;
+}
+
+void CaptureManager::StopAll() {
     // Get list of all session IDs first (with mutex held)
-    std::vector<DWORD> sessionIds;
+    std::vector<UINT32> sessionIds;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (const auto& pair : m_sessions) {
@@ -229,318 +463,239 @@ void CaptureManager::StopAllCaptures() {
     }
 
     // Stop each session WITHOUT holding the mutex (avoids deadlock)
-    for (DWORD processId : sessionIds) {
-        StopCapture(processId);
+    for (UINT32 sessionId : sessionIds) {
+        StopCaptureSession(sessionId);
     }
 }
 
-void CaptureManager::PauseAllCaptures() {
+void CaptureManager::PauseAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     for (auto& pair : m_sessions) {
-        if (pair.second->capture) {
-            pair.second->capture->Pause();
+        pair.second->isPaused = true;
+        for (auto& source : pair.second->sources) {
+            source->Pause();
         }
     }
 }
 
-void CaptureManager::ResumeAllCaptures() {
+void CaptureManager::ResumeAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     for (auto& pair : m_sessions) {
-        if (pair.second->capture) {
-            pair.second->capture->Resume();
+        pair.second->isPaused = false;
+        for (auto& source : pair.second->sources) {
+            source->Resume();
         }
     }
 }
 
-std::vector<CaptureSession*> CaptureManager::GetActiveSessions() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+void CaptureManager::OnAudioData(UINT32 sessionId, const std::wstring& sourceId,
+                                 const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
+    // CRITICAL OPTIMIZATION: Minimize mutex hold time to prevent callback blocking
+    // We'll acquire mutex briefly just to validate session and copy necessary pointers,
+    // then release it immediately before doing any expensive mixer operations
 
-    std::vector<CaptureSession*> sessions;
-    for (auto& pair : m_sessions) {
-        sessions.push_back(pair.second.get());
+    CaptureSessionInternal* sessionPtr = nullptr;
+    bool isPaused = false;
+    bool useMixer = false;
+    bool enableMixedOutput = false;
+    bool hasRoutingRules = false;
+    size_t sourceCount = 0;
+
+    // Fast path: Quick validation and data extraction with mutex held
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto it = m_sessions.find(sessionId);
+        if (it == m_sessions.end()) {
+            return;
+        }
+
+        sessionPtr = it->second.get();
+
+        // Fast lock-free validity check
+        if (!sessionPtr->isValid.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        isPaused = sessionPtr->isPaused;
+        enableMixedOutput = sessionPtr->enableMixedOutput;
+        hasRoutingRules = !sessionPtr->routingRules.empty();
+        sourceCount = sessionPtr->sources.size();
+
+        // Determine if we need mixer
+        useMixer = sessionPtr->mixer &&
+                   (enableMixedOutput || (sourceCount > 1 && !hasRoutingRules));
     }
+    // CRITICAL: Mutex is now released - other callbacks can proceed immediately
 
-    return sessions;
-}
-
-bool CaptureManager::IsCapturing(DWORD processId) const {
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_mutex));
-    return m_sessions.find(processId) != m_sessions.end();
-}
-
-void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    auto it = m_sessions.find(processId);
-    if (it == m_sessions.end()) {
+    if (isPaused) {
         return;
     }
 
-    CaptureSession* session = it->second.get();
+    // All mixer operations happen WITHOUT holding m_mutex
+    // AudioMixer has its own internal mutex for thread safety
+    if (useMixer) {
+        // Add audio to mixer (AudioMixer's internal mutex protects this)
+        DWORD mixerSourceId = std::hash<std::wstring>{}(sourceId);
+        sessionPtr->mixer->AddAudioData(mixerSourceId, data, size, format);
 
-    // Check for silence if skip silence is enabled
-    if (session->skipSilence && size > 0) {
-        const WAVEFORMATEX* format = session->capture->GetFormat();
-        if (format) {
-            bool isSilent = true;
-            UINT32 bytesPerSample = format->wBitsPerSample / 8;
-            UINT32 numSamples = size / bytesPerSample;
+        // CRITICAL FIX: Only call GetMixedAudio from the designated "mixer driver" source
+        // If every source calls GetMixedAudio, we get a race condition where mixed audio
+        // only succeeds intermittently when all sources happen to have data simultaneously
+        bool shouldPullMixedAudio = (sourceId == sessionPtr->mixerDriverSourceId);
 
-            // Define silence threshold (very low amplitude)
-            const int16_t SILENCE_THRESHOLD_16 = 50;  // ~0.15% of max amplitude
-            const int32_t SILENCE_THRESHOLD_32 = 3276;  // ~0.01% of max amplitude
+        // Get mixed audio and write to destinations (only from mixer driver source)
+        std::vector<BYTE> mixedBuffer;
+        if (shouldPullMixedAudio && sessionPtr->mixer->GetMixedAudio(mixedBuffer) && !mixedBuffer.empty()) {
+            // If explicit mixed output, write to dedicated mixed destination
+            if (enableMixedOutput && sessionPtr->mixedDestination && sessionPtr->mixedDestination->IsOpen()) {
+                sessionPtr->mixedDestination->WriteAudioData(mixedBuffer.data(),
+                                                            static_cast<UINT32>(mixedBuffer.size()));
+            }
 
-            if (bytesPerSample == 2) {
-                // 16-bit samples
-                const int16_t* samples = reinterpret_cast<const int16_t*>(data);
-                for (UINT32 i = 0; i < numSamples; i++) {
-                    if (abs(samples[i]) > SILENCE_THRESHOLD_16) {
-                        isSilent = false;
-                        break;
+            // If implicit mixing (multiple sources, no routing), write to all regular destinations
+            if (!enableMixedOutput && !hasRoutingRules) {
+                // Quick lock to iterate destinations safely
+                std::vector<OutputDestinationPtr> destinationsCopy;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (sessionPtr->isValid.load(std::memory_order_acquire)) {
+                        destinationsCopy = sessionPtr->destinations;
                     }
                 }
-            } else if (bytesPerSample == 4) {
-                // 32-bit samples
-                const int32_t* samples = reinterpret_cast<const int32_t*>(data);
-                for (UINT32 i = 0; i < numSamples; i++) {
-                    if (abs(samples[i]) > SILENCE_THRESHOLD_32) {
-                        isSilent = false;
-                        break;
+
+                for (auto& destination : destinationsCopy) {
+                    if (destination && destination->IsOpen()) {
+                        destination->WriteAudioData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
                     }
                 }
             }
-
-            // Skip writing if silent
-            if (isSilent) {
-                return;
-            }
         }
-    }
-
-    // Write data to appropriate encoder (skip if monitor-only mode)
-    if (!session->monitorOnly) {
-        bool success = false;
-        switch (session->format) {
-        case AudioFormat::WAV:
-            if (session->wavWriter) {
-                success = session->wavWriter->WriteData(data, size);
-            }
-            break;
-
-        case AudioFormat::MP3:
-            if (session->mp3Encoder) {
-                success = session->mp3Encoder->WriteData(data, size);
-            }
-            break;
-
-        case AudioFormat::OPUS:
-            if (session->opusEncoder) {
-                success = session->opusEncoder->WriteData(data, size);
-            }
-            break;
-
-        case AudioFormat::FLAC:
-            if (session->flacEncoder) {
-                success = session->flacEncoder->WriteData(data, size);
-            }
-            break;
-        }
-
-        if (success) {
-            session->bytesWritten += size;
-        }
-    }
-
-    // If mixed recording is enabled, also send data to the mixer
-    if (m_mixedRecordingEnabled && m_mixer) {
-        const WAVEFORMATEX* sessionFormat = session->capture->GetFormat();
-        m_mixer->AddAudioData(processId, data, size, sessionFormat);
+    } else {
+        // No mixer needed (single source or routing rules in use)
+        // Route audio directly to appropriate destinations
+        RouteAudioData(sessionPtr, sourceId, data, size, format);
     }
 }
 
-bool CaptureManager::EnableMixedRecording(const std::wstring& outputPath, AudioFormat format, UINT32 bitrate) {
-    std::lock_guard<std::mutex> lock(m_mixerMutex);
-
-    if (m_mixedRecordingEnabled) {
-        return false;  // Already enabled
+void CaptureManager::RouteAudioData(CaptureSessionInternal* session, const std::wstring& sourceId,
+                                   const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
+    // If no routing rules, route to all destinations
+    if (session->routingRules.empty()) {
+        for (auto& destination : session->destinations) {
+            if (destination->IsOpen()) {
+                destination->WriteAudioData(data, size);
+            }
+        }
+        return;
     }
 
-    // We need at least one session to get the audio format
-    if (m_sessions.empty()) {
-        return false;
+    // Apply routing rules
+    for (const auto& rule : session->routingRules) {
+        // Check if this rule applies to this source
+        if (!rule.sourceId.empty() && rule.sourceId != sourceId) {
+            continue;  // Rule doesn't apply to this source
+        }
+
+        // Skip silence if requested
+        if (rule.skipSilence && IsSilent(data, size, format)) {
+            continue;
+        }
+
+        // Find matching destination
+        for (auto& destination : session->destinations) {
+            if (!rule.destinationId.empty() && destination->GetName() != rule.destinationId) {
+                continue;  // Not the target destination
+            }
+
+            if (!destination->IsOpen()) {
+                continue;  // Destination not open
+            }
+
+            // Apply volume adjustment if needed
+            if (rule.volumeMultiplier != 1.0f) {
+                // Make a copy of the data to apply volume
+                std::vector<BYTE> modifiedData(data, data + size);
+                ApplyVolume(modifiedData.data(), size, format, rule.volumeMultiplier);
+                destination->WriteAudioData(modifiedData.data(), size);
+            } else {
+                destination->WriteAudioData(data, size);
+            }
+        }
+    }
+}
+
+bool CaptureManager::IsSilent(const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
+    if (!format || size == 0) {
+        return true;
     }
 
-    // Get format from first session (all sessions should have the same format)
-    const WAVEFORMATEX* waveFormat = m_sessions.begin()->second->capture->GetFormat();
-    if (!waveFormat) {
-        return false;
+    UINT32 bytesPerSample = format->wBitsPerSample / 8;
+    UINT32 numSamples = size / bytesPerSample;
+
+    // Define silence threshold (very low amplitude)
+    const int16_t SILENCE_THRESHOLD_16 = 50;  // ~0.15% of max amplitude
+    const int32_t SILENCE_THRESHOLD_32 = 3276;  // ~0.01% of max amplitude
+
+    if (bytesPerSample == 2) {
+        // 16-bit samples
+        const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+        for (UINT32 i = 0; i < numSamples; i++) {
+            if (abs(samples[i]) > SILENCE_THRESHOLD_16) {
+                return false;
+            }
+        }
+    } else if (bytesPerSample == 4) {
+        // 32-bit samples
+        const int32_t* samples = reinterpret_cast<const int32_t*>(data);
+        for (UINT32 i = 0; i < numSamples; i++) {
+            if (abs(samples[i]) > SILENCE_THRESHOLD_32) {
+                return false;
+            }
+        }
     }
 
-    // Create mixer
-    m_mixer = std::make_unique<AudioMixer>();
-    if (!m_mixer->Initialize(waveFormat)) {
-        m_mixer.reset();
-        return false;
-    }
-
-    // Create appropriate encoder
-    m_mixedFormat = format;
-    bool encoderReady = false;
-
-    switch (format) {
-    case AudioFormat::WAV:
-        m_mixedWavWriter = std::make_unique<WavWriter>();
-        encoderReady = m_mixedWavWriter->Open(outputPath, waveFormat);
-        break;
-
-    case AudioFormat::MP3:
-        m_mixedMp3Encoder = std::make_unique<Mp3Encoder>();
-        encoderReady = m_mixedMp3Encoder->Open(outputPath, waveFormat,
-                                                bitrate > 0 ? bitrate : 192000);
-        break;
-
-    case AudioFormat::OPUS:
-        m_mixedOpusEncoder = std::make_unique<OpusEncoder>();
-        encoderReady = m_mixedOpusEncoder->Open(outputPath, waveFormat,
-                                                 bitrate > 0 ? bitrate : 128000);
-        break;
-
-    case AudioFormat::FLAC:
-        m_mixedFlacEncoder = std::make_unique<FlacEncoder>();
-        encoderReady = m_mixedFlacEncoder->Open(outputPath, waveFormat,
-                                                 bitrate > 0 ? std::min(bitrate, 8u) : 5);
-        break;
-    }
-
-    if (!encoderReady) {
-        m_mixer.reset();
-        m_mixedWavWriter.reset();
-        m_mixedMp3Encoder.reset();
-        m_mixedOpusEncoder.reset();
-        m_mixedFlacEncoder.reset();
-        return false;
-    }
-
-    // Start mixer thread
-    m_mixerThreadRunning = true;
-    m_mixerThread = std::make_unique<std::thread>(&CaptureManager::MixerThread, this);
-
-    m_mixedRecordingEnabled = true;
     return true;
 }
 
-void CaptureManager::DisableMixedRecording() {
-    // Check if already disabled and mark as disabled (must do this BEFORE joining thread)
-    {
-        std::lock_guard<std::mutex> lock(m_mixerMutex);
-        if (!m_mixedRecordingEnabled) {
-            return;
+void CaptureManager::ApplyVolume(BYTE* data, UINT32 size, const WAVEFORMATEX* format, float volume) {
+    if (!format || volume == 1.0f) {
+        return;
+    }
+
+    UINT32 bytesPerSample = format->wBitsPerSample / 8;
+    UINT32 numSamples = size / bytesPerSample;
+
+    if (bytesPerSample == 2) {
+        // 16-bit samples
+        int16_t* samples = reinterpret_cast<int16_t*>(data);
+        for (UINT32 i = 0; i < numSamples; i++) {
+            float sample = static_cast<float>(samples[i]) * volume;
+            // Clamp to prevent overflow
+            if (sample > 32767.0f) sample = 32767.0f;
+            if (sample < -32768.0f) sample = -32768.0f;
+            samples[i] = static_cast<int16_t>(sample);
         }
-        // Set to false NOW so OnAudioData stops adding new data to mixer
-        m_mixedRecordingEnabled = false;
+    } else if (bytesPerSample == 4) {
+        // 32-bit samples (assume float)
+        float* samples = reinterpret_cast<float*>(data);
+        for (UINT32 i = 0; i < numSamples; i++) {
+            samples[i] *= volume;
+            // Clamp to prevent overflow
+            if (samples[i] > 1.0f) samples[i] = 1.0f;
+            if (samples[i] < -1.0f) samples[i] = -1.0f;
+        }
     }
-
-    // Signal thread to stop (atomic, no lock needed)
-    m_mixerThreadRunning = false;
-
-    // Wait for mixer thread to finish
-    if (m_mixerThread && m_mixerThread->joinable()) {
-        m_mixerThread->join();
-    }
-
-    // Now clean up
-    std::lock_guard<std::mutex> lock(m_mixerMutex);
-
-    // Close encoders
-    if (m_mixedWavWriter) {
-        m_mixedWavWriter->Close();
-        m_mixedWavWriter.reset();
-    }
-    if (m_mixedMp3Encoder) {
-        m_mixedMp3Encoder->Close();
-        m_mixedMp3Encoder.reset();
-    }
-    if (m_mixedOpusEncoder) {
-        m_mixedOpusEncoder->Close();
-        m_mixedOpusEncoder.reset();
-    }
-    if (m_mixedFlacEncoder) {
-        m_mixedFlacEncoder->Close();
-        m_mixedFlacEncoder.reset();
-    }
-
-    m_mixer.reset();
-    m_mixerThread.reset();
 }
 
-bool CaptureManager::IsMixedRecordingActive() const {
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_mixerMutex));
-    return m_mixedRecordingEnabled;
+size_t CaptureManager::GetActiveSessionCount() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_mutex));
+    return m_sessions.size();
 }
 
-void CaptureManager::MixerThread() {
-    std::vector<BYTE> mixedBuffer;
-
-    while (m_mixerThreadRunning) {
-        bool hasData = false;
-        AudioFormat currentFormat = AudioFormat::WAV;
-        WavWriter* wavWriter = nullptr;
-        Mp3Encoder* mp3Encoder = nullptr;
-        OpusEncoder* opusEncoder = nullptr;
-        FlacEncoder* flacEncoder = nullptr;
-
-        // Get mixed audio data and encoder pointers (with lock held)
-        {
-            std::lock_guard<std::mutex> lock(m_mixerMutex);
-
-            if (m_mixer) {
-                hasData = m_mixer->GetMixedAudio(mixedBuffer);
-                currentFormat = m_mixedFormat;
-
-                // Get raw pointers to encoders (they're managed by unique_ptrs in CaptureManager)
-                if (hasData && !mixedBuffer.empty()) {
-                    wavWriter = m_mixedWavWriter.get();
-                    mp3Encoder = m_mixedMp3Encoder.get();
-                    opusEncoder = m_mixedOpusEncoder.get();
-                    flacEncoder = m_mixedFlacEncoder.get();
-                }
-            }
-        }
-
-        // Write data to encoder WITHOUT lock held - encoding can be slow!
-        if (hasData && !mixedBuffer.empty() && m_mixerThreadRunning) {
-            switch (currentFormat) {
-            case AudioFormat::WAV:
-                if (wavWriter) {
-                    wavWriter->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
-                }
-                break;
-
-            case AudioFormat::MP3:
-                if (mp3Encoder) {
-                    mp3Encoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
-                }
-                break;
-
-            case AudioFormat::OPUS:
-                if (opusEncoder) {
-                    opusEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
-                }
-                break;
-
-            case AudioFormat::FLAC:
-                if (flacEncoder) {
-                    flacEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
-                }
-                break;
-            }
-        }
-
-        if (!hasData) {
-            // Sleep for a short time if no data available
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
+bool CaptureManager::IsSessionActive(UINT32 sessionId) const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_mutex));
+    return m_sessions.find(sessionId) != m_sessions.end();
 }

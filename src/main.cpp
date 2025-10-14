@@ -3,14 +3,22 @@
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <shlobj.h>
+#include <fstream>
 #include <string>
 #include <vector>
-#include <fstream>
+#include <memory>
+#include <map>
 #include <nlohmann/json.hpp>
 #include "resource.h"
-#include "ProcessEnumerator.h"
 #include "CaptureManager.h"
+#include "InputSourceManager.h"
+#include "OutputDestinationManager.h"
 #include "AudioDeviceEnumerator.h"
+#include "WavFileDestination.h"
+#include "Mp3FileDestination.h"
+#include "OpusFileDestination.h"
+#include "FlacFileDestination.h"
+#include "DeviceOutputDestination.h"
 
 using json = nlohmann::json;
 
@@ -20,156 +28,141 @@ using json = nlohmann::json;
 // Global variables
 HINSTANCE g_hInst;
 HWND g_hWnd;
-HWND g_hProcessList;
-HWND g_hRefreshBtn;
-HWND g_hStartBtn;
-HWND g_hStopBtn;
-HWND g_hStopAllBtn;
-HWND g_hPauseAllBtn;
-HWND g_hResumeAllBtn;
-HWND g_hFormatCombo;
+
+// UI Controls (in tab order)
+HWND g_hInputSourcesLabel;     // "Input Sources" label
+HWND g_hInputFilterCombo;      // Filter combo box for input sources
+HWND g_hOutputDestsLabel;      // "Output Destinations" label
+HWND g_hOutputFilterCombo;     // Filter combo box for output destinations
+HWND g_hInputSourcesList;      // Checkable list of input sources
+HWND g_hOutputDestsList;       // Checkable list of output destinations
+HWND g_hBitrateEdit;           // Bitrate for MP3/Opus (kbps)
+HWND g_hBitrateSpin;           // Spin control for bitrate
+HWND g_hFlacCompressionEdit;   // FLAC compression level (0-8)
+HWND g_hFlacCompressionSpin;   // Spin control for FLAC compression
+HWND g_hCaptureModeGroup;      // Group box for capture mode
+HWND g_hRadioSingleFile;       // Single file mode radio button
+HWND g_hRadioMultipleFiles;    // Multiple files mode radio button
+HWND g_hRadioBothModes;        // Both modes radio button
+HWND g_hVolumeLabel;           // Volume label showing current source
+HWND g_hVolumeSlider;          // Volume slider (0-100)
+HWND g_hVolumeValue;           // Volume percentage display
 HWND g_hOutputPath;
 HWND g_hBrowseBtn;
+HWND g_hRefreshBtn;
+HWND g_hStartStopBtn;
 HWND g_hStatusText;
-HWND g_hRecordingList;
-HWND g_hMp3BitrateCombo;
-HWND g_hOpusBitrateCombo;
-HWND g_hMp3BitrateLabel;
-HWND g_hOpusBitrateLabel;
-HWND g_hProcessListLabel;
-HWND g_hOutputPathLabel;
-HWND g_hRecordingListLabel;
-HWND g_hSkipSilenceCheckbox;
-HWND g_hFlacCompressionCombo;
-HWND g_hFlacCompressionLabel;
-HWND g_hShowAudioOnlyCheckbox;
-HWND g_hPassthroughCheckbox;
-HWND g_hPassthroughDeviceCombo;
-HWND g_hPassthroughDeviceLabel;
-HWND g_hMonitorOnlyCheckbox;
-HWND g_hRecordingModeCombo;
-HWND g_hRecordingModeLabel;
-HWND g_hMicrophoneCheckbox;
-HWND g_hMicrophoneDeviceCombo;
-HWND g_hMicrophoneDeviceLabel;
-HWND g_hFormatLabel;
-HWND g_hProcessVolumeSlider;
-HWND g_hProcessVolumeLabel;
-HWND g_hMicrophoneVolumeSlider;
-HWND g_hMicrophoneVolumeLabel;
+HACCEL g_hAccel;               // Accelerator table
 
-// Volume settings (0-100%)
-float g_processVolume = 100.0f;  // Default to 100%
-float g_microphoneVolume = 100.0f;  // Default to 100%
-
-std::unique_ptr<ProcessEnumerator> g_processEnum;
+// Managers
 std::unique_ptr<CaptureManager> g_captureManager;
-std::unique_ptr<AudioDeviceEnumerator> g_audioDeviceEnum;
-std::vector<ProcessInfo> g_processes;
-bool g_useWinRT = false;  // Track whether we initialized with WinRT or COM
-bool g_supportsProcessCapture = false;  // Track whether OS supports process-specific capture
+std::unique_ptr<InputSourceManager> g_sourceManager;
+std::unique_ptr<OutputDestinationManager> g_destManager;
+std::unique_ptr<AudioDeviceEnumerator> g_deviceEnumerator;
+
+// State
+std::vector<AvailableSource> g_availableSources;
+std::vector<AudioDeviceInfo> g_availableOutputDevices;
+std::vector<UINT32> g_activeSessionIds;  // Multiple sessions for multi-file mode
+bool g_isCapturing = false;
+bool g_useWinRT = false;
+
+// Volume settings per source (key = source ID, value = volume 0.0-1.0)
+std::map<std::wstring, float> g_sourceVolumes;
+
+// Active source tracking (key = source ID, value = InputSourcePtr) for real-time control
+std::map<std::wstring, InputSourcePtr> g_activeSources;
+
+// Active destination tracking (key = destination ID, value = OutputDestinationPtr) for real-time control
+std::map<std::wstring, OutputDestinationPtr> g_activeDestinations;
+
+// Active capture mode and settings (stored when capture starts, used for dynamic source/dest addition)
+int g_activeCaptureMode = -1;  // -1 = not capturing, 0 = Single File, 1 = Multiple Files, 2 = Both Modes
+std::vector<int> g_activeFileFormats;   // Which file formats are checked (0-3 for WAV/MP3/Opus/FLAC)
+std::vector<int> g_activeDeviceIndices; // Which device indices are checked
+std::wstring g_activeOutputPath;        // Output folder path
+int g_activeBitrate;                    // Bitrate setting (in bps)
+int g_activeFlacCompression;            // FLAC compression level (0-8)
+
+// Session tracking: map sessionId to list of source IDs in that session
+// This allows us to determine proper filenames when dynamically adding destinations
+std::map<UINT32, std::vector<std::wstring>> g_sessionToSources;
+
+// Store the audio format used for the current capture session
+// This is needed for dynamically adding destinations during capture
+std::vector<BYTE> g_activeCaptureFormat;
 
 // Window class name
 const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
 
+// Destination type and index encoding for lParam - forward declarations
+// Format: (type << 16) | index
+// Type: 0 = File Format (WAV/MP3/Opus/FLAC), 1 = Device
+// Index: For file formats: 0=WAV, 1=MP3, 2=Opus, 3=FLAC; For devices: device index in g_availableOutputDevices
+inline LPARAM MakeDestinationParam(int type, int index) {
+    return static_cast<LPARAM>((type << 16) | (index & 0xFFFF));
+}
+
+inline int GetDestinationType(LPARAM lParam) {
+    return static_cast<int>(lParam >> 16);
+}
+
+inline int GetDestinationIndex(LPARAM lParam) {
+    return static_cast<int>(lParam & 0xFFFF);
+}
+
 // Forward declarations
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void InitializeControls(HWND hwnd);
-void RefreshProcessList();
+void RefreshInputSources();
+void RefreshOutputDestinations();
+UINT32 CreatePerSourceSession(InputSourcePtr source, const WAVEFORMATEX* formatCopy, bool includeDevices);
 void StartCapture();
 void StopCapture();
-void UpdateRecordingList();
 void BrowseOutputFolder();
-void OnFormatChanged();
-std::wstring GetDefaultOutputPath();
-std::wstring FormatFileSize(UINT64 bytes);
+void UpdateStatus(const std::wstring& message);
 void LoadSettings();
 void SaveSettings();
-std::wstring GetSettingsFilePath();
-std::string WStringToString(const std::wstring& wstr);
-std::wstring StringToWString(const std::string& str);
-void PopulatePassthroughDevices();
-void OnPassthroughCheckboxChanged();
-void OnMonitorOnlyCheckboxChanged();
-void PopulateMicrophoneDevices();
-void OnMicrophoneCheckboxChanged();
+std::wstring GetDefaultOutputPath();
+std::wstring GetSettingsPath();
+int GetBitrate();
+int GetFlacCompression();
+int GetCaptureMode();
+std::wstring SanitizeFilename(const std::wstring& displayName);
+void UpdateControlVisibility();
+void UpdateVolumeControls();
+void OnVolumeSliderChanged();
+float GetSourceVolume(const std::wstring& sourceId);
+void SetSourceVolume(const std::wstring& sourceId, float volume);
 
-// Helper to detect Windows version
-bool IsWindows8OrGreater() {
-    typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
-    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-    if (!hNtdll) return false;
-
-    RtlGetVersionPtr RtlGetVersion = (RtlGetVersionPtr)GetProcAddress(hNtdll, "RtlGetVersion");
-    if (!RtlGetVersion) return false;
-
-    RTL_OSVERSIONINFOW osvi = { 0 };
-    osvi.dwOSVersionInfoSize = sizeof(osvi);
-    if (RtlGetVersion(&osvi) == 0) {
-        // Windows 8 is version 6.2, Windows 10 is 10.0
-        return (osvi.dwMajorVersion > 6) || (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion >= 2);
-    }
-    return false;
-}
-
-// Helper to detect if process-specific capture is supported (Windows 10 Build 19041+)
-bool SupportsProcessCapture() {
-    typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
-    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-    if (!hNtdll) return false;
-
-    RtlGetVersionPtr RtlGetVersion = (RtlGetVersionPtr)GetProcAddress(hNtdll, "RtlGetVersion");
-    if (!RtlGetVersion) return false;
-
-    RTL_OSVERSIONINFOW osvi = { 0 };
-    osvi.dwOSVersionInfoSize = sizeof(osvi);
-    if (RtlGetVersion(&osvi) == 0) {
-        // Windows 10 version 2004 (build 19041) and later supports process-specific capture
-        // Windows 11 is version 10.0.22000+
-        return (osvi.dwMajorVersion == 10 && osvi.dwBuildNumber >= 19041) || (osvi.dwMajorVersion > 10);
-    }
-    return false;
-}
-
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+// WinMain entry point
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
     g_hInst = hInstance;
 
-    // Detect OS capabilities
-    g_supportsProcessCapture = SupportsProcessCapture();
+    // Initialize COM - use MULTITHREADED for better audio capture performance
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hr)) {
+        MessageBox(nullptr, L"Failed to initialize COM", L"Error", MB_OK | MB_ICONERROR);
+        return 1;
+    }
 
-    // Initialize COM/WinRT based on Windows version
-    // Windows 8+ supports WinRT (RoInitialize)
-    // Windows 7 requires traditional COM (CoInitializeEx)
-    HRESULT hr;
-    bool useWinRT = IsWindows8OrGreater();
-    g_useWinRT = useWinRT;  // Store for cleanup later
-
-    if (useWinRT) {
-        // Initialize Windows Runtime (required for ActivateAudioInterfaceAsync on Windows 10+)
-        // RoInitialize initializes both COM and WinRT
-        // IMPORTANT: Must use RO_INIT_SINGLETHREADED for ActivateAudioInterfaceAsync to work
-        hr = RoInitialize(RO_INIT_SINGLETHREADED);
-        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
-            char errMsg[256];
-            sprintf_s(errMsg, "Failed to initialize Windows Runtime: 0x%08X", hr);
-            MessageBoxA(nullptr, errMsg, "Error", MB_OK | MB_ICONERROR);
-            return 0;
+    // Try to initialize WinRT (Windows 10+)
+    // Use __try/__except to handle delay-load DLL failure on Windows 7
+    __try {
+        hr = RoInitialize(RO_INIT_MULTITHREADED);
+        if (SUCCEEDED(hr)) {
+            g_useWinRT = true;
         }
-    } else {
-        // Windows 7 - use traditional COM initialization
-        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE) {
-            char errMsg[256];
-            sprintf_s(errMsg, "Failed to initialize COM: 0x%08X", hr);
-            MessageBoxA(nullptr, errMsg, "Error", MB_OK | MB_ICONERROR);
-            return 0;
-        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // WinRT not available (Windows 7 or older)
+        g_useWinRT = false;
     }
 
     // Initialize common controls
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
+    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
     // Register window class
@@ -179,1641 +172,1900 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.lpszClassName = CLASS_NAME;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
 
     RegisterClass(&wc);
 
-    // Create window with appropriate title
-    const wchar_t* windowTitle = g_supportsProcessCapture ?
-        L"Audio Capture - Per-Process Recording" :
-        L"Audio Capture - System Audio";
-
+    // Create window
     g_hWnd = CreateWindowEx(
-        0,
-        CLASS_NAME,
-        windowTitle,
+        0, CLASS_NAME, L"AudioCapture - Multi-Source Recording",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
-        nullptr,
-        nullptr,
-        hInstance,
-        nullptr
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 700,
+        nullptr, nullptr, hInstance, nullptr
     );
 
     if (g_hWnd == nullptr) {
-        return 0;
+        MessageBox(nullptr, L"Failed to create window", L"Error", MB_OK | MB_ICONERROR);
+        return 1;
     }
-
-    // Initialize global objects
-    g_processEnum = std::make_unique<ProcessEnumerator>();
-    g_captureManager = std::make_unique<CaptureManager>();
-    g_audioDeviceEnum = std::make_unique<AudioDeviceEnumerator>();
 
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
 
-    // Message loop with dialog message processing for tab navigation
+    // Create accelerator table for keyboard shortcuts
+    ACCEL accels[] = {
+        { FVIRTKEY | FCONTROL, 'R', IDC_REFRESH_BTN },      // Ctrl+R = Refresh
+        { FVIRTKEY | FCONTROL, 'S', IDC_START_STOP_BTN },   // Ctrl+S = Start/Stop
+        { FVIRTKEY | FCONTROL, 'O', IDC_BROWSE_BTN },       // Ctrl+O = Open/Browse
+        { FVIRTKEY, VK_F5, IDC_REFRESH_BTN },               // F5 = Refresh
+    };
+    g_hAccel = CreateAcceleratorTable(accels, ARRAYSIZE(accels));
+
+    // Message loop with accelerator and dialog message support
     MSG msg = {};
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (!IsDialogMessage(g_hWnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+        // Check for accelerator keys first (Ctrl+R, Ctrl+S, etc.)
+        if (!TranslateAccelerator(g_hWnd, g_hAccel, &msg)) {
+            // Handle spacebar for list view checkboxes
+            if (msg.message == WM_KEYDOWN && msg.wParam == VK_SPACE) {
+                if (msg.hwnd == g_hInputSourcesList) {
+                    int selected = ListView_GetNextItem(g_hInputSourcesList, -1, LVNI_FOCUSED);
+                    if (selected != -1) {
+                        BOOL checked = ListView_GetCheckState(g_hInputSourcesList, selected);
+                        ListView_SetCheckState(g_hInputSourcesList, selected, !checked);
+                        continue;  // Skip further processing
+                    }
+                }
+                else if (msg.hwnd == g_hOutputDestsList) {
+                    int selected = ListView_GetNextItem(g_hOutputDestsList, -1, LVNI_FOCUSED);
+                    if (selected != -1) {
+                        BOOL checked = ListView_GetCheckState(g_hOutputDestsList, selected);
+                        ListView_SetCheckState(g_hOutputDestsList, selected, !checked);
+                        continue;  // Skip further processing
+                    }
+                }
+            }
+
+            // Use IsDialogMessage for Tab navigation and other keyboard handling
+            if (!IsDialogMessage(g_hWnd, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
         }
     }
 
-    // Cleanup COM/Windows Runtime
-    if (g_useWinRT) {
-        RoUninitialize();
-    } else {
-        CoUninitialize();
+    // Cleanup
+    if (g_hAccel) {
+        DestroyAcceleratorTable(g_hAccel);
     }
+
+    // Cleanup
+    if (g_captureManager) {
+        g_captureManager->StopAll();
+    }
+
+    if (g_useWinRT) {
+        __try {
+            RoUninitialize();
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Ignore if DLL unload fails
+        }
+    }
+    CoUninitialize();
 
     return 0;
 }
 
+// Window procedure
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_CREATE:
         InitializeControls(hwnd);
         LoadSettings();
-        RefreshProcessList();
-        // Set initial focus based on OS support
-        if (g_supportsProcessCapture) {
-            SetFocus(g_hProcessList);
-        } else {
-            SetFocus(g_hStartBtn);
+        RefreshInputSources();
+        return 0;
+
+    case WM_ACTIVATE:
+        // Set focus to input sources list when window is activated
+        if (LOWORD(wParam) != WA_INACTIVE && g_hInputSourcesList) {
+            SetFocus(g_hInputSourcesList);
         }
-        // Start timer for updating recording list (every 500ms)
-        SetTimer(hwnd, 1, 500, nullptr);
-        // Populate devices after window is fully created
-        PostMessage(hwnd, WM_USER + 1, 0, 0);
         return 0;
 
-    case WM_USER + 1:
-        // Called after window is fully created
-        PopulatePassthroughDevices();
-        PopulateMicrophoneDevices();
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_REFRESH_BTN) {
+            RefreshInputSources();
+            RefreshOutputDestinations();
+        }
+        else if (LOWORD(wParam) == IDC_START_STOP_BTN) {
+            if (g_isCapturing) {
+                StopCapture();
+            } else {
+                StartCapture();
+            }
+        }
+        else if (LOWORD(wParam) == IDC_BROWSE_BTN) {
+            BrowseOutputFolder();
+        }
+        else if (LOWORD(wParam) == IDC_INPUT_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
+            // Filter combo box selection changed - refresh the input sources list
+            RefreshInputSources();
+        }
+        else if (LOWORD(wParam) == IDC_OUTPUT_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
+            // Output filter combo box selection changed - refresh the output destinations list
+            RefreshOutputDestinations();
+        }
         return 0;
 
-    case WM_COMMAND: {
-        int wmId = LOWORD(wParam);
-        int wmEvent = HIWORD(wParam);
+    case WM_NOTIFY:
+        {
+            LPNMHDR pnmh = (LPNMHDR)lParam;
+            // Detect checkbox state changes in output destinations list
+            if (pnmh->idFrom == IDC_OUTPUT_DESTS_LIST && pnmh->code == LVN_ITEMCHANGED) {
+                LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
+                if (pnmv->uChanged & LVIF_STATE) {
+                    // Checkbox state changed
+                    UpdateControlVisibility();
 
-        switch (wmId) {
-        case IDC_REFRESH_BTN:
-            RefreshProcessList();
-            break;
+                    // Handle real-time destination addition/removal during capture
+                    if (g_isCapturing && (pnmv->uNewState & LVIS_STATEIMAGEMASK) != (pnmv->uOldState & LVIS_STATEIMAGEMASK)) {
+                        int itemIndex = pnmv->iItem;
+                        BOOL isNowChecked = ListView_GetCheckState(g_hOutputDestsList, itemIndex);
 
-        case IDC_START_BTN:
-            StartCapture();
-            break;
 
-        case IDC_STOP_BTN:
-            StopCapture();
-            break;
+                        // Get the destination metadata from lParam
+                        LVITEM lvi = {};
+                        lvi.mask = LVIF_PARAM;
+                        lvi.iItem = itemIndex;
+                        if (!ListView_GetItem(g_hOutputDestsList, &lvi)) {
+                            return 0;  // Failed to get item info
+                        }
 
-        case IDC_STOP_ALL_BTN:
-            if (MessageBox(g_hWnd, L"Stop all active captures?", L"Confirm", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                // Stop all individual captures FIRST (stops audio callbacks)
-                g_captureManager->StopAllCaptures();
-                // Then disable mixed recording (mixer thread can exit cleanly)
-                g_captureManager->DisableMixedRecording();
-                EnableWindow(g_hStopBtn, FALSE);
-                EnableWindow(g_hStopAllBtn, FALSE);
-                ShowWindow(g_hStopAllBtn, SW_HIDE);
-                UpdateRecordingList();
-                SetWindowText(g_hStatusText, L"All captures stopped.");
-                if (g_supportsProcessCapture) {
-                    SetFocus(g_hProcessList);
-                } else {
-                    SetFocus(g_hStartBtn);
+                        int destType = GetDestinationType(lvi.lParam);
+                        int destIndex = GetDestinationIndex(lvi.lParam);
+
+                        // Get output path and format info
+                        wchar_t pathBuf[MAX_PATH];
+                        GetWindowText(g_hOutputPath, pathBuf, MAX_PATH);
+                        std::wstring outputPath = pathBuf;
+
+                        if (isNowChecked) {
+                            // Destination was checked - add to all active sessions
+                            // Use the stored capture format from when capture was started
+                            if (!g_activeCaptureFormat.empty()) {
+                                const WAVEFORMATEX* formatCopy = reinterpret_cast<const WAVEFORMATEX*>(g_activeCaptureFormat.data());
+
+                                int bitrate = GetBitrate() * 1000;
+                                int flacCompression = GetFlacCompression();
+
+                                // Lambda to create a destination with specific filename
+                                auto CreateDestWithFilename = [&](const std::wstring& baseFilename) -> OutputDestinationPtr {
+                                    OutputDestinationPtr dest;
+                                    DestinationConfig config;
+                                    config.useTimestamp = true;
+
+                                    // Create destination based on type and index from lParam
+                                    if (destType == 0) {  // File format
+                                        if (destIndex == 0) {  // WAV File
+                                            config.outputPath = outputPath + L"\\" + baseFilename + L".wav";
+                                            dest = std::make_shared<WavFileDestination>();
+                                        }
+                                        else if (destIndex == 1) {  // MP3 File
+                                            config.outputPath = outputPath + L"\\" + baseFilename + L".mp3";
+                                            config.bitrate = bitrate;
+                                            dest = std::make_shared<Mp3FileDestination>();
+                                        }
+                                        else if (destIndex == 2) {  // Opus File
+                                            config.outputPath = outputPath + L"\\" + baseFilename + L".opus";
+                                            config.bitrate = bitrate;
+                                            dest = std::make_shared<OpusFileDestination>();
+                                        }
+                                        else if (destIndex == 3) {  // FLAC File
+                                            config.outputPath = outputPath + L"\\" + baseFilename + L".flac";
+                                            config.compressionLevel = flacCompression;
+                                            dest = std::make_shared<FlacFileDestination>();
+                                        }
+                                    }
+                                    else if (destType == 1) {  // Audio Device
+                                        if (destIndex >= 0 && destIndex < static_cast<int>(g_availableOutputDevices.size())) {
+                                            dest = std::make_shared<DeviceOutputDestination>();
+                                            config.outputPath = g_availableOutputDevices[destIndex].deviceId;
+                                            config.friendlyName = g_availableOutputDevices[destIndex].friendlyName;
+                                        }
+                                    }
+
+                                    if (dest && dest->Configure(formatCopy, config)) {
+                                        return dest;
+                                    }
+                                    return nullptr;
+                                };
+
+                                // CRITICAL: Create a SEPARATE destination instance for EACH session
+                                // with appropriate filename based on session type
+                                bool addedToAny = false;
+                                int destCreated = 0;
+                                int destConfigured = 0;
+                                int destAdded = 0;
+
+                                for (size_t sessionIdx = 0; sessionIdx < g_activeSessionIds.size(); sessionIdx++) {
+                                    UINT32 sessionId = g_activeSessionIds[sessionIdx];
+
+                                    // Determine filename based on session type
+                                    std::wstring baseFilename = L"capture";
+
+                                    // In Mode 2 (Both), first session is ALWAYS the mixed session
+                                    // Remaining sessions are per-source sessions
+                                    bool isMixedSession = (g_activeCaptureMode == 2 && sessionIdx == 0);
+
+                                    auto sessionSourcesIt = g_sessionToSources.find(sessionId);
+                                    if (sessionSourcesIt != g_sessionToSources.end()) {
+                                        const auto& sourceIds = sessionSourcesIt->second;
+
+                                        // Use source-specific filename for per-source sessions
+                                        if (!isMixedSession && sourceIds.size() == 1) {
+                                            const std::wstring& sourceId = sourceIds[0];
+                                            auto sourceIt = g_activeSources.find(sourceId);
+                                            if (sourceIt != g_activeSources.end()) {
+                                                std::wstring sourceName = sourceIt->second->GetMetadata().displayName;
+                                                std::wstring sanitizedName = SanitizeFilename(sourceName);
+                                                baseFilename = sanitizedName + L"_capture";
+                                            }
+                                        }
+                                        // Otherwise use "capture" (mixed session or multi-source session)
+                                    }
+
+                                    OutputDestinationPtr dest = CreateDestWithFilename(baseFilename);
+                                    destCreated++;
+                                    if (dest) {
+                                        destConfigured++;
+                                        if (g_captureManager->AddOutputDestination(sessionId, dest)) {
+                                            addedToAny = true;
+                                            destAdded++;
+                                            // Store each destination instance separately
+                                            g_activeDestinations[dest->GetName()] = dest;
+                                        }
+                                    }
+                                }
+
+                                if (!addedToAny) {
+                                    MessageBox(g_hWnd, L"Failed to add destination to any session", L"Warning", MB_OK | MB_ICONWARNING);
+                                }
+                            }
+                        } else {
+                            // Destination was unchecked - remove from all active sessions
+                            // We need to find the actual destination name from g_activeDestinations
+                            // because file destinations use timestamped paths as their names
+
+                            // Search for destination by matching the output path pattern
+                            std::wstring searchPattern;
+                            if (destType == 0) {  // File format
+                                if (destIndex == 0) searchPattern = L".wav";
+                                else if (destIndex == 1) searchPattern = L".mp3";
+                                else if (destIndex == 2) searchPattern = L".opus";
+                                else if (destIndex == 3) searchPattern = L".flac";
+                            }
+                            else if (destType == 1) {  // Audio Device
+                                if (destIndex >= 0 && destIndex < static_cast<int>(g_availableOutputDevices.size())) {
+                                    searchPattern = g_availableOutputDevices[destIndex].friendlyName;
+                                }
+                            }
+
+                            if (!searchPattern.empty()) {
+                                // Find matching destination(s) in active destinations
+                                std::vector<std::wstring> destIdsToRemove;
+                                for (const auto& pair : g_activeDestinations) {
+                                    const std::wstring& destName = pair.first;
+                                    // For file formats, match by extension; for devices, match exact name
+                                    if (destType == 0) {
+                                        // File format - check if name ends with the extension
+                                        if (destName.length() >= searchPattern.length() &&
+                                            destName.substr(destName.length() - searchPattern.length()) == searchPattern) {
+                                            destIdsToRemove.push_back(destName);
+                                        }
+                                    } else {
+                                        // Device - match exact name
+                                        if (destName == searchPattern) {
+                                            destIdsToRemove.push_back(destName);
+                                        }
+                                    }
+                                }
+
+                                // Remove all matching destinations
+                                for (const auto& destId : destIdsToRemove) {
+                                    for (UINT32 sessionId : g_activeSessionIds) {
+                                        g_captureManager->RemoveOutputDestination(sessionId, destId);
+                                    }
+                                    g_activeDestinations.erase(destId);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            break;
+            // Detect focus and checkbox state changes in input sources list
+            else if (pnmh->idFrom == IDC_INPUT_SOURCES_LIST && pnmh->code == LVN_ITEMCHANGED) {
+                LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
+                // Update volume controls when focus changes or checkbox state changes
+                if ((pnmv->uChanged & LVIF_STATE) &&
+                    ((pnmv->uNewState & LVIS_FOCUSED) != (pnmv->uOldState & LVIS_FOCUSED) ||
+                     (pnmv->uNewState & LVIS_STATEIMAGEMASK) != (pnmv->uOldState & LVIS_STATEIMAGEMASK))) {
+                    UpdateVolumeControls();
 
-        case IDC_PAUSE_ALL_BTN:
-            g_captureManager->PauseAllCaptures();
-            SetWindowText(g_hStatusText, L"All captures paused.");
-            UpdateRecordingList();  // Update button states immediately
-            if (g_supportsProcessCapture) {
-                SetFocus(g_hProcessList);
-            } else {
-                SetFocus(g_hStartBtn);
+                    // Handle real-time source addition/removal during capture
+                    if (g_isCapturing && (pnmv->uNewState & LVIS_STATEIMAGEMASK) != (pnmv->uOldState & LVIS_STATEIMAGEMASK)) {
+                        // Checkbox state changed during capture
+                        int itemIndex = pnmv->iItem;
+                        if (itemIndex >= 0 && itemIndex < static_cast<int>(g_availableSources.size())) {
+                            BOOL isNowChecked = ListView_GetCheckState(g_hInputSourcesList, itemIndex);
+                            const auto& sourceMetadata = g_availableSources[itemIndex];
+
+                            if (isNowChecked) {
+                                // Source was checked - add dynamically based on capture mode
+                                auto source = g_sourceManager->CreateSource(sourceMetadata);
+                                if (source) {
+                                    // Apply volume setting
+                                    float volume = GetSourceVolume(source->GetMetadata().id);
+                                    source->SetVolume(volume);
+
+                                    // Start the source temporarily to get its format
+                                    if (!source->StartCapture()) {
+                                        ListView_SetCheckState(g_hInputSourcesList, itemIndex, FALSE);
+                                        MessageBox(g_hWnd, L"Failed to start source", L"Error", MB_OK | MB_ICONWARNING);
+                                        return 0;
+                                    }
+
+                                    // Get format from the new source
+                                    const WAVEFORMATEX* format = source->GetFormat();
+                                    if (!format) {
+                                        source->StopCapture();
+                                        ListView_SetCheckState(g_hInputSourcesList, itemIndex, FALSE);
+                                        MessageBox(g_hWnd, L"Cannot get audio format from source", L"Error", MB_OK | MB_ICONWARNING);
+                                        return 0;
+                                    }
+
+                                    // Make a copy of the format
+                                    UINT32 formatSize = sizeof(WAVEFORMATEX) + format->cbSize;
+                                    std::vector<BYTE> formatBuffer(formatSize);
+                                    memcpy(formatBuffer.data(), format, formatSize);
+                                    const WAVEFORMATEX* formatCopy = reinterpret_cast<const WAVEFORMATEX*>(formatBuffer.data());
+
+                                    // Stop the source - CaptureManager will start it properly
+                                    source->StopCapture();
+
+                                    bool addedToAny = false;
+                                    bool hadFailure = false;
+
+                                    // Mode 0: Single File - add to all existing sessions
+                                    if (g_activeCaptureMode == 0) {
+                                        for (UINT32 sessionId : g_activeSessionIds) {
+                                            if (g_captureManager->AddInputSource(sessionId, source)) {
+                                                addedToAny = true;
+                                            } else {
+                                                hadFailure = true;
+                                            }
+                                        }
+                                    }
+                                    // Mode 1: Multiple Files - create new per-source session
+                                    else if (g_activeCaptureMode == 1) {
+                                        // In Mode 1, include devices in per-source sessions (each source can be monitored)
+                                        UINT32 sessionId = CreatePerSourceSession(source, formatCopy, true);
+                                        if (sessionId != 0) {
+                                            g_activeSessionIds.push_back(sessionId);
+                                            addedToAny = true;
+                                        }
+                                    }
+                                    // Mode 2: Both Modes - add to mixed session AND create per-source session
+                                    else if (g_activeCaptureMode == 2) {
+                                        // Add to first session (mixed session which has the devices)
+                                        if (!g_activeSessionIds.empty()) {
+                                            if (g_captureManager->AddInputSource(g_activeSessionIds[0], source)) {
+                                                addedToAny = true;
+                                            }
+                                        }
+
+                                        // Also create per-source session (no devices - mixed session has them)
+                                        UINT32 sessionId = CreatePerSourceSession(source, formatCopy, false);
+                                        if (sessionId != 0) {
+                                            g_activeSessionIds.push_back(sessionId);
+                                            addedToAny = true;
+                                        }
+                                    }
+
+                                    // Store for real-time control only if successfully added
+                                    if (addedToAny) {
+                                        g_activeSources[source->GetMetadata().id] = source;
+
+                                        // Update status
+                                        std::wstring statusMsg = L"Added source: " + sourceMetadata.metadata.displayName;
+                                        if (hadFailure) {
+                                            statusMsg += L" (some sessions failed)";
+                                        }
+                                        UpdateStatus(statusMsg);
+                                    } else {
+                                        // Failed to add - uncheck the checkbox
+                                        ListView_SetCheckState(g_hInputSourcesList, itemIndex, FALSE);
+                                        MessageBox(g_hWnd, L"Failed to add source", L"Error", MB_OK | MB_ICONWARNING);
+                                        UpdateStatus(L"Failed to add source: " + sourceMetadata.metadata.displayName);
+                                    }
+                                } else {
+                                    // Failed to create source - uncheck the checkbox
+                                    ListView_SetCheckState(g_hInputSourcesList, itemIndex, FALSE);
+                                    UpdateStatus(L"Failed to create source: " + sourceMetadata.metadata.displayName);
+                                }
+                            } else {
+                                // Source was unchecked - remove from sessions
+                                bool removedAny = false;
+
+                                // Mode 0: Remove from all sessions (current behavior)
+                                if (g_activeCaptureMode == 0) {
+                                    for (UINT32 sessionId : g_activeSessionIds) {
+                                        if (g_captureManager->RemoveInputSource(sessionId, sourceMetadata.metadata.id)) {
+                                            removedAny = true;
+                                        }
+                                    }
+                                }
+                                // Mode 1: Find and stop the per-source session
+                                else if (g_activeCaptureMode == 1) {
+                                    // In Mode 1, each source has its own session
+                                    // Remove the source from all sessions (will find its session)
+                                    std::vector<UINT32> sessionsToRemove;
+                                    for (UINT32 sessionId : g_activeSessionIds) {
+                                        if (g_captureManager->RemoveInputSource(sessionId, sourceMetadata.metadata.id)) {
+                                            removedAny = true;
+                                            // Stop this session since it only had this one source
+                                            g_captureManager->StopCaptureSession(sessionId);
+                                            sessionsToRemove.push_back(sessionId);
+                                        }
+                                    }
+                                    // Remove from session IDs list
+                                    for (UINT32 sid : sessionsToRemove) {
+                                        g_activeSessionIds.erase(std::remove(g_activeSessionIds.begin(), g_activeSessionIds.end(), sid), g_activeSessionIds.end());
+                                    }
+                                }
+                                // Mode 2: Remove from mixed session AND stop per-source session
+                                else if (g_activeCaptureMode == 2) {
+                                    // Remove from first session (mixed)
+                                    if (!g_activeSessionIds.empty()) {
+                                        if (g_captureManager->RemoveInputSource(g_activeSessionIds[0], sourceMetadata.metadata.id)) {
+                                            removedAny = true;
+                                        }
+                                    }
+
+                                    // Find and stop the per-source session (skip first session which is mixed)
+                                    std::vector<UINT32> sessionsToRemove;
+                                    for (size_t i = 1; i < g_activeSessionIds.size(); i++) {
+                                        UINT32 sessionId = g_activeSessionIds[i];
+                                        if (g_captureManager->RemoveInputSource(sessionId, sourceMetadata.metadata.id)) {
+                                            // Stop this per-source session
+                                            g_captureManager->StopCaptureSession(sessionId);
+                                            sessionsToRemove.push_back(sessionId);
+                                        }
+                                    }
+                                    // Remove from session IDs list
+                                    for (UINT32 sid : sessionsToRemove) {
+                                        g_activeSessionIds.erase(std::remove(g_activeSessionIds.begin(), g_activeSessionIds.end(), sid), g_activeSessionIds.end());
+                                    }
+                                }
+
+                                // Remove from active sources tracking
+                                g_activeSources.erase(sourceMetadata.metadata.id);
+
+                                // Update status
+                                if (removedAny) {
+                                    UpdateStatus(L"Removed source: " + sourceMetadata.metadata.displayName);
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            break;
-
-        case IDC_RESUME_ALL_BTN:
-            g_captureManager->ResumeAllCaptures();
-            SetWindowText(g_hStatusText, L"All captures resumed.");
-            UpdateRecordingList();  // Update button states immediately
-            if (g_supportsProcessCapture) {
-                SetFocus(g_hProcessList);
-            } else {
-                SetFocus(g_hStartBtn);
-            }
-            break;
-
-        case IDC_BROWSE_BTN:
-            BrowseOutputFolder();
-            break;
-
-        case IDC_FORMAT_COMBO:
-            if (wmEvent == CBN_SELCHANGE) {
-                OnFormatChanged();
-            }
-            break;
-
-        case IDC_SHOW_AUDIO_ONLY_CHECKBOX:
-            if (wmEvent == BN_CLICKED) {
-                RefreshProcessList();
-            }
-            break;
-
-        case IDC_PASSTHROUGH_CHECKBOX:
-            if (wmEvent == BN_CLICKED) {
-                OnPassthroughCheckboxChanged();
-            }
-            break;
-
-        case IDC_MONITOR_ONLY_CHECKBOX:
-            if (wmEvent == BN_CLICKED) {
-                OnMonitorOnlyCheckboxChanged();
-            }
-            break;
-
-        case IDC_MICROPHONE_CHECKBOX:
-            if (wmEvent == BN_CLICKED) {
-                OnMicrophoneCheckboxChanged();
-            }
-            break;
         }
         return 0;
-    }
 
-    case WM_SIZE: {
-        // Resize controls when window is resized
-        RECT rcClient;
-        GetClientRect(hwnd, &rcClient);
-        int width = rcClient.right - rcClient.left;
-        int height = rcClient.bottom - rcClient.top;
-
-        // Adjust control positions and sizes based on whether process list is visible
-        int topOffset = g_supportsProcessCapture ? 245 : 10;
-
-        if (g_supportsProcessCapture) {
-            SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
-            SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
-            SetWindowPos(g_hRefreshBtn, nullptr, 10, 215, 100, 25, SWP_NOZORDER);
-            SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 218, 280, 20, SWP_NOZORDER);
-        } else {
-            // Show format label when process list is hidden
-            SetWindowPos(g_hFormatLabel, nullptr, 10, topOffset - 20, 60, 20, SWP_NOZORDER);
+    case WM_HSCROLL:
+        {
+            // Handle volume slider changes
+            if ((HWND)lParam == g_hVolumeSlider) {
+                OnVolumeSliderChanged();
+            }
         }
-
-        SetWindowPos(g_hFormatCombo, nullptr, 10, topOffset, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPathLabel, nullptr, 10, topOffset + 30, 100, 20, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPath, nullptr, 10, topOffset + 50, width - 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50, 75, 25, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85, 140, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82, 150, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopBtn, nullptr, 120, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingListLabel, nullptr, 10, topOffset + 155, 200, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingList, nullptr, 10, topOffset + 175, width - 20, height - (topOffset + 225), SWP_NOZORDER);
-        SetWindowPos(g_hStatusText, nullptr, 10, height - 40, width - 20, 30, SWP_NOZORDER);
         return 0;
-    }
+
+    case WM_SIZE:
+        // Auto-resize controls
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int width = rc.right - rc.left;
+            int height = rc.bottom - rc.top;
+
+            // Input filter combo box (left side, between label and list)
+            SetWindowPos(g_hInputFilterCombo, nullptr, 10, 32, 250, 25, SWP_NOZORDER);
+
+            // Input sources list (left half, below combo box)
+            SetWindowPos(g_hInputSourcesList, nullptr, 10, 60, (width / 2) - 20, height - 150, SWP_NOZORDER);
+
+            // Output filter combo box (right side, between label and list)
+            SetWindowPos(g_hOutputFilterCombo, nullptr, (width / 2) + 10, 32, 200, 25, SWP_NOZORDER);
+
+            // Output destinations list (right half, below combo box)
+            SetWindowPos(g_hOutputDestsList, nullptr, (width / 2) + 10, 60, (width / 2) - 20, height - 150, SWP_NOZORDER);
+
+            // Bottom controls
+            SetWindowPos(g_hOutputPath, nullptr, 80, height - 80, width - 230, 25, SWP_NOZORDER);
+            SetWindowPos(g_hBrowseBtn, nullptr, width - 140, height - 80, 60, 25, SWP_NOZORDER);
+            SetWindowPos(g_hStartStopBtn, nullptr, width - 70, height - 80, 60, 25, SWP_NOZORDER);
+            SetWindowPos(g_hStatusText, nullptr, 10, height - 45, width - 20, 35, SWP_NOZORDER);
+        }
+        return 0;
+
+    case WM_CLOSE:
+        SaveSettings();
+        DestroyWindow(hwnd);
+        return 0;
 
     case WM_DESTROY:
-        SaveSettings();
-        g_captureManager->StopAllCaptures();
         PostQuitMessage(0);
         return 0;
-
-    case WM_TIMER:
-        if (wParam == 1) {
-            // Update recording list periodically
-            UpdateRecordingList();
-        }
-        return 0;
-
-    case WM_HSCROLL: {
-        // Handle slider changes
-        HWND hSlider = (HWND)lParam;
-
-        if (hSlider == g_hProcessVolumeSlider) {
-            int pos = (int)SendMessage(g_hProcessVolumeSlider, TBM_GETPOS, 0, 0);
-            g_processVolume = (float)pos;
-
-            wchar_t volumeText[64];
-            swprintf_s(volumeText, L"Process Volume: %d%%", pos);
-            SetWindowText(g_hProcessVolumeLabel, volumeText);
-        }
-        else if (hSlider == g_hMicrophoneVolumeSlider) {
-            int pos = (int)SendMessage(g_hMicrophoneVolumeSlider, TBM_GETPOS, 0, 0);
-            g_microphoneVolume = (float)pos;
-
-            wchar_t volumeText[64];
-            swprintf_s(volumeText, L"Microphone Volume: %d%%", pos);
-            SetWindowText(g_hMicrophoneVolumeLabel, volumeText);
-        }
-        return 0;
-    }
     }
 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+// Initialize all UI controls
 void InitializeControls(HWND hwnd) {
-    // Determine visibility based on OS support
-    DWORD processListVisibility = g_supportsProcessCapture ? (WS_CHILD | WS_VISIBLE) : WS_CHILD;
+    // Create managers
+    g_captureManager = std::make_unique<CaptureManager>();
+    g_sourceManager = std::make_unique<InputSourceManager>();
+    g_destManager = std::make_unique<OutputDestinationManager>();
+    g_deviceEnumerator = std::make_unique<AudioDeviceEnumerator>();
 
-    // Process list label
-    g_hProcessListLabel = CreateWindow(
-        L"STATIC", L"Available Processes:",
-        processListVisibility | SS_LEFT,
-        10, 10, 200, 20,
-        hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
-    );
+    // Title labels (static text - not tabbable) - Store HWNDs for control
+    g_hInputSourcesLabel = CreateWindow(L"STATIC", L"Input Sources (check to capture):",
+        WS_VISIBLE | WS_CHILD,
+        10, 10, 400, 20, hwnd, (HMENU)0x2000, g_hInst, nullptr);
 
-    // Process list (ListView) - with checkboxes for multi-select
-    g_hProcessList = CreateWindowEx(
+    // Input filter combo box (between label and list)
+    g_hInputFilterCombo = CreateWindowEx(
+        0,
+        L"COMBOBOX", nullptr,
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+        10, 32, 250, 200, hwnd, (HMENU)IDC_INPUT_FILTER_COMBO, g_hInst, nullptr);
+
+    // Populate the filter combo box
+    SendMessage(g_hInputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"All");
+    SendMessage(g_hInputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"Input Devices");
+
+    // Only add process filters if WinRT is available (Windows 10 Build 19041+)
+    if (g_useWinRT) {
+        SendMessage(g_hInputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"Processes");
+        SendMessage(g_hInputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"Processes with Audio Sessions Only");
+    }
+
+    SendMessage(g_hInputFilterCombo, CB_SETCURSEL, 0, 0);  // Default to "All"
+
+    g_hOutputDestsLabel = CreateWindow(L"STATIC", L"Output Destinations (check to record/monitor):",
+        WS_VISIBLE | WS_CHILD,
+        560, 10, 400, 20, hwnd, (HMENU)0x2001, g_hInst, nullptr);
+
+    // Output filter combo box (between label and list)
+    g_hOutputFilterCombo = CreateWindowEx(
+        0,
+        L"COMBOBOX", nullptr,
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+        560, 32, 200, 200, hwnd, (HMENU)IDC_OUTPUT_FILTER_COMBO, g_hInst, nullptr);
+
+    // Populate the output filter combo box
+    SendMessage(g_hOutputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"All");
+    SendMessage(g_hOutputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"File Formats");
+    SendMessage(g_hOutputFilterCombo, CB_ADDSTRING, 0, (LPARAM)L"Output Devices");
+    SendMessage(g_hOutputFilterCombo, CB_SETCURSEL, 0, 0);  // Default to "All"
+
+    // Settings labels and controls (on the right side under output destinations)
+    // Initially hidden - will show when MP3/Opus/FLAC are selected
+    CreateWindow(L"STATIC", L"Bitrate (kbps):",
+        WS_CHILD,  // Hidden initially
+        560, 545, 100, 20, hwnd, (HMENU)0x1000, g_hInst, nullptr);
+
+    g_hBitrateEdit = CreateWindowEx(
         WS_EX_CLIENTEDGE,
-        WC_LISTVIEW,
-        L"",
-        processListVisibility | WS_TABSTOP | LVS_REPORT,
-        10, 30, 760, 180,
-        hwnd,
-        (HMENU)IDC_PROCESS_LIST,
-        g_hInst,
-        nullptr
-    );
+        L"EDIT", L"192",
+        WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,  // Hidden initially
+        670, 543, 60, 22, hwnd, nullptr, g_hInst, nullptr);
 
-    // Enable checkboxes for the process list
-    ListView_SetExtendedListViewStyle(g_hProcessList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+    g_hBitrateSpin = CreateWindowEx(
+        0, UPDOWN_CLASS, nullptr,
+        WS_CHILD | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS,  // Hidden initially
+        0, 0, 0, 0, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(g_hBitrateSpin, UDM_SETBUDDY, (WPARAM)g_hBitrateEdit, 0);
+    SendMessage(g_hBitrateSpin, UDM_SETRANGE, 0, MAKELPARAM(320, 64));
+    SendMessage(g_hBitrateSpin, UDM_SETPOS, 0, 192);
 
-    // Set up list view columns
-    LVCOLUMN lvc;
+    CreateWindow(L"STATIC", L"FLAC Level:",
+        WS_CHILD,  // Hidden initially
+        750, 545, 80, 20, hwnd, (HMENU)0x1001, g_hInst, nullptr);
+
+    g_hFlacCompressionEdit = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        L"EDIT", L"5",
+        WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,  // Hidden initially
+        840, 543, 40, 22, hwnd, nullptr, g_hInst, nullptr);
+
+    g_hFlacCompressionSpin = CreateWindowEx(
+        0, UPDOWN_CLASS, nullptr,
+        WS_CHILD | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS,  // Hidden initially
+        0, 0, 0, 0, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(g_hFlacCompressionSpin, UDM_SETBUDDY, (WPARAM)g_hFlacCompressionEdit, 0);
+    SendMessage(g_hFlacCompressionSpin, UDM_SETRANGE, 0, MAKELPARAM(8, 0));
+    SendMessage(g_hFlacCompressionSpin, UDM_SETPOS, 0, 5);
+
+    // Capture Mode Selection Group - positioned near output folder controls
+    g_hCaptureModeGroup = CreateWindow(L"BUTTON", L"Capture Mode:",
+        WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
+        900, 543, 180, 70, hwnd, (HMENU)IDC_CAPTURE_MODE_GROUP, g_hInst, nullptr);
+
+    // Radio buttons for capture mode (inside group box)
+    g_hRadioSingleFile = CreateWindow(L"BUTTON", L"Single &File (mixed)",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP,
+        910, 563, 160, 20, hwnd, (HMENU)IDC_RADIO_SINGLE_FILE, g_hInst, nullptr);
+
+    g_hRadioMultipleFiles = CreateWindow(L"BUTTON", L"&Multiple Files",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+        910, 583, 120, 20, hwnd, (HMENU)IDC_RADIO_MULTI_FILES, g_hInst, nullptr);
+
+    g_hRadioBothModes = CreateWindow(L"BUTTON", L"Bot&h Modes",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+        1030, 583, 100, 20, hwnd, (HMENU)IDC_RADIO_BOTH_MODES, g_hInst, nullptr);
+
+    // Set default selection to Single File mode
+    SendMessage(g_hRadioSingleFile, BM_SETCHECK, BST_CHECKED, 0);
+
+    // Input sources list (checkable) - TAB ORDER 1
+    g_hInputSourcesList = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        WC_LISTVIEW, L"Input Sources (check to capture)",
+        WS_VISIBLE | WS_CHILD | WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
+        10, 35, 530, 500, hwnd, (HMENU)IDC_INPUT_SOURCES_LIST, g_hInst, nullptr);
+
+    ListView_SetExtendedListViewStyle(g_hInputSourcesList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+
+    // Add columns
+    LVCOLUMN lvc = {};
     lvc.mask = LVCF_TEXT | LVCF_WIDTH;
-    lvc.cx = 180;
-    lvc.pszText = (LPWSTR)L"Process Name";
-    ListView_InsertColumn(g_hProcessList, 0, &lvc);
+    lvc.pszText = (LPWSTR)L"Source";
+    lvc.cx = 350;
+    ListView_InsertColumn(g_hInputSourcesList, 0, &lvc);
 
-    lvc.cx = 60;
-    lvc.pszText = (LPWSTR)L"PID";
-    ListView_InsertColumn(g_hProcessList, 1, &lvc);
+    lvc.pszText = (LPWSTR)L"Type";
+    lvc.cx = 150;
+    ListView_InsertColumn(g_hInputSourcesList, 1, &lvc);
 
+    // Volume controls (below input sources list) - Initially hidden
+    // Positioned entirely on the left side to avoid screen reader confusion with right side controls
+    g_hVolumeLabel = CreateWindow(L"STATIC", L"Volume: (select a source)",
+        WS_CHILD,  // Hidden initially
+        10, 543, 240, 20, hwnd, (HMENU)IDC_VOLUME_LABEL, g_hInst, nullptr);
+
+    g_hVolumeSlider = CreateWindowEx(
+        0, TRACKBAR_CLASS, nullptr,
+        WS_CHILD | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,  // Hidden initially
+        260, 540, 200, 30, hwnd, (HMENU)IDC_VOLUME_SLIDER, g_hInst, nullptr);
+    SendMessage(g_hVolumeSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+    SendMessage(g_hVolumeSlider, TBM_SETPOS, TRUE, 100);  // Default 100%
+
+    g_hVolumeValue = CreateWindow(L"STATIC", L"",
+        WS_CHILD,  // Hidden initially
+        470, 543, 50, 20, hwnd, (HMENU)IDC_VOLUME_VALUE, g_hInst, nullptr);
+
+    // Output destinations list (checkable) - TAB ORDER 2
+    // Positioned below the filter combo box
+    g_hOutputDestsList = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        WC_LISTVIEW, L"Output Destinations (check to record/monitor)",
+        WS_VISIBLE | WS_CHILD | WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
+        560, 60, 530, 475, hwnd, (HMENU)IDC_OUTPUT_DESTS_LIST, g_hInst, nullptr);
+
+    ListView_SetExtendedListViewStyle(g_hOutputDestsList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+
+    lvc.pszText = (LPWSTR)L"Destination";
     lvc.cx = 250;
-    lvc.pszText = (LPWSTR)L"Window Title";
-    ListView_InsertColumn(g_hProcessList, 2, &lvc);
+    ListView_InsertColumn(g_hOutputDestsList, 0, &lvc);
 
-    lvc.cx = 300;
-    lvc.pszText = (LPWSTR)L"Path";
-    ListView_InsertColumn(g_hProcessList, 3, &lvc);
+    lvc.pszText = (LPWSTR)L"Type";
+    lvc.cx = 250;
+    ListView_InsertColumn(g_hOutputDestsList, 1, &lvc);
 
-    // Refresh button
-    g_hRefreshBtn = CreateWindow(
-        L"BUTTON", L"Refresh",
-        processListVisibility | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 215, 100, 25,
-        hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr
-    );
+    // Populate output destinations with file formats and audio devices
+    RefreshOutputDestinations();
 
-    // Show audio only checkbox
-    g_hShowAudioOnlyCheckbox = CreateWindow(
-        L"BUTTON", L"Show only processes with active audio",
-        processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
-        120, 218, 280, 20,
-        hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
-    );
+    // Bottom controls label (not tabbable) - ASSIGN UNIQUE ID
+    CreateWindow(L"STATIC", L"Output Folder:",
+        WS_VISIBLE | WS_CHILD,
+        10, 550, 70, 20, hwnd, (HMENU)0x2002, g_hInst, nullptr);
 
-    // Format label (only visible when process list is hidden)
-    g_hFormatLabel = CreateWindow(
-        L"STATIC", L"Format:",
-        WS_CHILD | (g_supportsProcessCapture ? 0 : WS_VISIBLE) | SS_LEFT,
-        10, -15, 60, 20,
-        hwnd, nullptr, g_hInst, nullptr
-    );
-
-    // Format combo box
-    g_hFormatCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-        10, 245, 100, 200,
-        hwnd, (HMENU)IDC_FORMAT_COMBO, g_hInst, nullptr
-    );
-    SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"WAV");
-    SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"MP3");
-    SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"Opus");
-    SendMessage(g_hFormatCombo, CB_ADDSTRING, 0, (LPARAM)L"FLAC");
-    SendMessage(g_hFormatCombo, CB_SETCURSEL, 0, 0);
-
-    // MP3 bitrate label
-    g_hMp3BitrateLabel = CreateWindow(
-        L"STATIC", L"MP3 Bitrate:",
-        WS_CHILD | SS_LEFT,
-        120, 248, 80, 20,
-        hwnd, (HMENU)IDC_MP3_BITRATE_LABEL, g_hInst, nullptr
-    );
-
-    // MP3 bitrate combo box
-    g_hMp3BitrateCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        200, 245, 80, 200,
-        hwnd, (HMENU)IDC_MP3_BITRATE_COMBO, g_hInst, nullptr
-    );
-    SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"128 kbps");
-    SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"192 kbps");
-    SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"256 kbps");
-    SendMessage(g_hMp3BitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"320 kbps");
-    SendMessage(g_hMp3BitrateCombo, CB_SETCURSEL, 1, 0);  // Default to 192 kbps
-
-    // Opus bitrate label
-    g_hOpusBitrateLabel = CreateWindow(
-        L"STATIC", L"Opus Bitrate:",
-        WS_CHILD | SS_LEFT,
-        120, 248, 80, 20,
-        hwnd, (HMENU)IDC_OPUS_BITRATE_LABEL, g_hInst, nullptr
-    );
-
-    // Opus bitrate combo box
-    g_hOpusBitrateCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        200, 245, 80, 200,
-        hwnd, (HMENU)IDC_OPUS_BITRATE_COMBO, g_hInst, nullptr
-    );
-    SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"64 kbps");
-    SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"96 kbps");
-    SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"128 kbps");
-    SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"192 kbps");
-    SendMessage(g_hOpusBitrateCombo, CB_ADDSTRING, 0, (LPARAM)L"256 kbps");
-    SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, 2, 0);  // Default to 128 kbps
-
-    // FLAC compression label
-    g_hFlacCompressionLabel = CreateWindow(
-        L"STATIC", L"FLAC Level:",
-        WS_CHILD | SS_LEFT,
-        120, 248, 80, 20,
-        hwnd, (HMENU)IDC_FLAC_COMPRESSION_LABEL, g_hInst, nullptr
-    );
-
-    // FLAC compression combo box
-    g_hFlacCompressionCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        200, 245, 80, 200,
-        hwnd, (HMENU)IDC_FLAC_COMPRESSION_COMBO, g_hInst, nullptr
-    );
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"0 (Fast)");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"1");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"2");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"3");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"4");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"5 (Default)");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"6");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"7");
-    SendMessage(g_hFlacCompressionCombo, CB_ADDSTRING, 0, (LPARAM)L"8 (Best)");
-    SendMessage(g_hFlacCompressionCombo, CB_SETCURSEL, 5, 0);  // Default to level 5
-
-    // Skip silence checkbox
-    g_hSkipSilenceCheckbox = CreateWindow(
-        L"BUTTON", L"Skip silence",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        290, 247, 120, 20,
-        hwnd, (HMENU)IDC_SKIP_SILENCE_CHECKBOX, g_hInst, nullptr
-    );
-
-    // Passthrough checkbox
-    g_hPassthroughCheckbox = CreateWindow(
-        L"BUTTON", L"Monitor audio",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        420, 247, 120, 20,
-        hwnd, (HMENU)IDC_PASSTHROUGH_CHECKBOX, g_hInst, nullptr
-    );
-
-    // Passthrough device label
-    g_hPassthroughDeviceLabel = CreateWindow(
-        L"STATIC", L"Monitor Device:",
-        WS_CHILD | SS_LEFT,
-        550, 248, 100, 20,
-        hwnd, (HMENU)IDC_PASSTHROUGH_DEVICE_LABEL, g_hInst, nullptr
-    );
-
-    // Passthrough device combo box
-    g_hPassthroughDeviceCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        650, 245, 140, 200,
-        hwnd, (HMENU)IDC_PASSTHROUGH_DEVICE_COMBO, g_hInst, nullptr
-    );
-
-    // Monitor only checkbox
-    g_hMonitorOnlyCheckbox = CreateWindow(
-        L"BUTTON", L"Monitor only (no recording)",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        420, 270, 200, 20,
-        hwnd, (HMENU)IDC_MONITOR_ONLY_CHECKBOX, g_hInst, nullptr
-    );
-
-    // Recording mode label
-    g_hRecordingModeLabel = CreateWindow(
-        L"STATIC", L"Multi-process recording:",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 330, 140, 20,
-        hwnd, (HMENU)IDC_RECORDING_MODE_LABEL, g_hInst, nullptr
-    );
-
-    // Recording mode combo box
-    g_hRecordingModeCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-        150, 327, 150, 200,
-        hwnd, (HMENU)IDC_RECORDING_MODE_COMBO, g_hInst, nullptr
-    );
-    SendMessage(g_hRecordingModeCombo, CB_ADDSTRING, 0, (LPARAM)L"Separate files");
-    SendMessage(g_hRecordingModeCombo, CB_ADDSTRING, 0, (LPARAM)L"Combined file");
-    SendMessage(g_hRecordingModeCombo, CB_ADDSTRING, 0, (LPARAM)L"Both");
-    SendMessage(g_hRecordingModeCombo, CB_SETCURSEL, 0, 0);  // Default to separate files
-
-    // Microphone capture checkbox
-    g_hMicrophoneCheckbox = CreateWindow(
-        L"BUTTON", L"Capture microphone",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        310, 330, 140, 20,
-        hwnd, (HMENU)IDC_MICROPHONE_CHECKBOX, g_hInst, nullptr
-    );
-
-    // Microphone device label
-    g_hMicrophoneDeviceLabel = CreateWindow(
-        L"STATIC", L"Microphone:",
-        WS_CHILD | SS_LEFT,
-        460, 333, 80, 20,
-        hwnd, (HMENU)IDC_MICROPHONE_DEVICE_LABEL, g_hInst, nullptr
-    );
-
-    // Microphone device combo box
-    g_hMicrophoneDeviceCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        540, 327, 230, 200,
-        hwnd, (HMENU)IDC_MICROPHONE_DEVICE_COMBO, g_hInst, nullptr
-    );
-
-    // Process volume label
-    g_hProcessVolumeLabel = CreateWindow(
-        L"STATIC", L"Process Volume: 100%",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 298, 140, 20,
-        hwnd, (HMENU)IDC_PROCESS_VOLUME_LABEL, g_hInst, nullptr
-    );
-
-    // Process volume slider (0-100)
-    g_hProcessVolumeSlider = CreateWindowEx(
-        0, TRACKBAR_CLASS, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
-        150, 298, 200, 20,
-        hwnd, (HMENU)IDC_PROCESS_VOLUME_SLIDER, g_hInst, nullptr
-    );
-    SendMessage(g_hProcessVolumeSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-    SendMessage(g_hProcessVolumeSlider, TBM_SETPOS, TRUE, 100);
-    SendMessage(g_hProcessVolumeSlider, TBM_SETTICFREQ, 10, 0);
-
-    // Microphone volume label (initially hidden)
-    g_hMicrophoneVolumeLabel = CreateWindow(
-        L"STATIC", L"Microphone Volume: 100%",
-        WS_CHILD | SS_LEFT,
-        360, 298, 150, 20,
-        hwnd, (HMENU)IDC_MICROPHONE_VOLUME_LABEL, g_hInst, nullptr
-    );
-
-    // Microphone volume slider (0-100, initially hidden)
-    g_hMicrophoneVolumeSlider = CreateWindowEx(
-        0, TRACKBAR_CLASS, L"",
-        WS_CHILD | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
-        510, 298, 200, 20,
-        hwnd, (HMENU)IDC_MICROPHONE_VOLUME_SLIDER, g_hInst, nullptr
-    );
-    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETPOS, TRUE, 100);
-    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETTICFREQ, 10, 0);
-
-    // Output path label
-    g_hOutputPathLabel = CreateWindow(
-        L"STATIC", L"Output Folder:",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 275, 100, 20,
-        hwnd, (HMENU)IDC_OUTPUT_PATH_LABEL, g_hInst, nullptr
-    );
-
-    // Output path edit
+    // Output path edit box - TAB ORDER 3
     g_hOutputPath = CreateWindowEx(
         WS_EX_CLIENTEDGE,
-        L"EDIT",
-        GetDefaultOutputPath().c_str(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
-        10, 295, 680, 25,
-        hwnd, (HMENU)IDC_OUTPUT_PATH, g_hInst, nullptr
-    );
+        L"EDIT", GetDefaultOutputPath().c_str(),
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+        80, 545, 880, 25, hwnd, (HMENU)IDC_OUTPUT_PATH, g_hInst, nullptr);
 
-    // Browse button
-    g_hBrowseBtn = CreateWindow(
-        L"BUTTON", L"Browse...",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        700, 295, 75, 25,
-        hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
-    );
+    // Browse button - TAB ORDER 4
+    g_hBrowseBtn = CreateWindow(L"BUTTON", L"&Browse...",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        970, 545, 60, 25, hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr);
 
-    // Start button
-    g_hStartBtn = CreateWindow(
-        L"BUTTON", L"Start Capture",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 360, 100, 30,
-        hwnd, (HMENU)IDC_START_BTN, g_hInst, nullptr
-    );
+    // Refresh button - TAB ORDER 5
+    g_hRefreshBtn = CreateWindow(L"BUTTON", L"&Refresh",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        10, 580, 80, 30, hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr);
 
-    // Stop button
-    g_hStopBtn = CreateWindow(
-        L"BUTTON", L"Stop Capture",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        120, 360, 100, 30,
-        hwnd, (HMENU)IDC_STOP_BTN, g_hInst, nullptr
-    );
+    // Start/Stop button - TAB ORDER 6
+    g_hStartStopBtn = CreateWindow(L"BUTTON", L"&Start",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
+        1040, 545, 50, 25, hwnd, (HMENU)IDC_START_STOP_BTN, g_hInst, nullptr);
 
-    // Stop All button (initially hidden)
-    g_hStopAllBtn = CreateWindow(
-        L"BUTTON", L"Stop All",
-        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        230, 360, 100, 30,
-        hwnd, (HMENU)IDC_STOP_ALL_BTN, g_hInst, nullptr
-    );
+    // Status text (not tabbable)
+    g_hStatusText = CreateWindow(L"STATIC", L"Ready. Select sources and destinations, then click Start.\r\n\r\nKeyboard shortcuts: F5 or Ctrl+R = Refresh | Ctrl+S = Start/Stop | Ctrl+O = Browse | Space = Toggle checkbox",
+        WS_VISIBLE | WS_CHILD | SS_LEFT,
+        10, 620, 1080, 40, hwnd, nullptr, g_hInst, nullptr);
 
-    // Pause All button (initially hidden)
-    g_hPauseAllBtn = CreateWindow(
-        L"BUTTON", L"Pause All",
-        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        340, 360, 100, 30,
-        hwnd, (HMENU)IDC_PAUSE_ALL_BTN, g_hInst, nullptr
-    );
-
-    // Resume All button (initially hidden)
-    g_hResumeAllBtn = CreateWindow(
-        L"BUTTON", L"Resume All",
-        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        450, 360, 100, 30,
-        hwnd, (HMENU)IDC_RESUME_ALL_BTN, g_hInst, nullptr
-    );
-
-    // Recording list label
-    g_hRecordingListLabel = CreateWindow(
-        L"STATIC", L"Active Recordings:",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 400, 200, 20,
-        hwnd, (HMENU)IDC_RECORDING_LIST_LABEL, g_hInst, nullptr
-    );
-
-    // Recording list (ListView)
-    g_hRecordingList = CreateWindowEx(
-        WS_EX_CLIENTEDGE,
-        WC_LISTVIEW,
-        L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
-        10, 420, 760, 100,
-        hwnd,
-        (HMENU)IDC_RECORDING_LIST,
-        g_hInst,
-        nullptr
-    );
-
-    lvc.mask = LVCF_TEXT | LVCF_WIDTH;
-    lvc.cx = 180;
-    lvc.pszText = (LPWSTR)L"Process";
-    ListView_InsertColumn(g_hRecordingList, 0, &lvc);
-
-    lvc.cx = 80;
-    lvc.pszText = (LPWSTR)L"PID";
-    ListView_InsertColumn(g_hRecordingList, 1, &lvc);
-
-    lvc.cx = 380;
-    lvc.pszText = (LPWSTR)L"Output File";
-    ListView_InsertColumn(g_hRecordingList, 2, &lvc);
-
-    lvc.cx = 100;
-    lvc.pszText = (LPWSTR)L"Data Written";
-    ListView_InsertColumn(g_hRecordingList, 3, &lvc);
-
-    // Status text
-    g_hStatusText = CreateWindowEx(
-        WS_EX_CLIENTEDGE,
-        L"STATIC",
-        L"Ready. Select a process and click Start Capture.",
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 520, 760, 30,
-        hwnd, (HMENU)IDC_STATUS_TEXT, g_hInst, nullptr
-    );
+    // Set initial focus to input sources list
+    SetFocus(g_hInputSourcesList);
 }
 
-void RefreshProcessList() {
-    // If process capture is not supported, don't populate the list
-    if (!g_supportsProcessCapture) {
-        SetWindowText(g_hStatusText, L"System audio capture mode. Per-process capture not available on this OS version.");
-        return;
-    }
+// Refresh the input sources list
+void RefreshInputSources() {
+    ListView_DeleteAllItems(g_hInputSourcesList);
+    g_availableSources.clear();
 
-    // Save checked state before clearing the list
-    std::vector<DWORD> checkedPIDs;
-    int itemCount = ListView_GetItemCount(g_hProcessList);
-    for (int i = 0; i < itemCount; i++) {
-        if (ListView_GetCheckState(g_hProcessList, i)) {
-            wchar_t pidStr[32];
-            ListView_GetItemText(g_hProcessList, i, 1, pidStr, 32);
-            DWORD pid = (DWORD)_wtoi(pidStr);
-            checkedPIDs.push_back(pid);
-        }
-    }
+    UpdateStatus(L"Refreshing sources...");
 
-    ListView_DeleteAllItems(g_hProcessList);
-    g_processes = g_processEnum->GetAllProcesses();
+    // Get selected filter from combo box
+    int filterIndex = static_cast<int>(SendMessage(g_hInputFilterCombo, CB_GETCURSEL, 0, 0));
+    // 0 = All, 1 = Input Devices, 2 = Processes, 3 = Processes with Audio Sessions Only
 
-    // Check if we should filter by active audio
-    bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    bool includeProcesses = (filterIndex == 0 || filterIndex == 2 || filterIndex == 3) && g_useWinRT;  // Processes require WinRT (Windows 10+)
+    bool includeInputDevices = (filterIndex == 0 || filterIndex == 1);
+    bool includeSystemAudio = (filterIndex == 0);  // System audio only in "All" mode
 
-    int displayedCount = 0;
+    // Refresh all source types (no output devices - those are destinations)
+    g_sourceManager->RefreshAvailableSources(
+        includeProcesses,      // Include processes based on filter AND WinRT availability
+        includeSystemAudio,    // Include system audio based on filter
+        includeInputDevices,   // Include input devices based on filter
+        false                  // Don't include output devices here - they go in destinations
+    );
 
-    // Always add system-wide audio option as first item (unless filtering by active audio)
-    if (!showAudioOnly) {
-        LVITEM lvi = {};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = 0;
-        lvi.pszText = (LPWSTR)L"[System Audio - All Processes]";
-        int index = ListView_InsertItem(g_hProcessList, &lvi);
+    g_availableSources = g_sourceManager->GetAvailableSources();
 
-        ListView_SetItemText(g_hProcessList, index, 1, (LPWSTR)L"0");
-        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)L"Capture all system audio");
-        ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)L"System-wide loopback");
-
-        // Check if system audio was previously checked (PID 0)
-        for (DWORD checkedPID : checkedPIDs) {
-            if (checkedPID == 0) {
-                ListView_SetCheckState(g_hProcessList, index, TRUE);
-                break;
-            }
-        }
-
-        displayedCount++;
-    }
-
-    for (size_t i = 0; i < g_processes.size(); i++) {
-        ProcessInfo& proc = g_processes[i];
-
-        // Fetch window title and audio status on-demand (lazy loading for performance)
-        if (proc.windowTitle.empty()) {
-            proc.windowTitle = g_processEnum->GetWindowTitle(proc.processId);
-        }
-
-        // Only check audio status if we're filtering by it
-        if (showAudioOnly) {
-            proc.hasActiveAudio = g_processEnum->CheckProcessHasActiveAudio(proc.processId);
-
-            // Skip if filtering and process doesn't have active audio
-            if (!proc.hasActiveAudio) {
-                continue;
-            }
-        }
-
-        LVITEM lvi = {};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = displayedCount;
-
-        // Process name (first column)
-        lvi.pszText = (LPWSTR)proc.processName.c_str();
-        int index = ListView_InsertItem(g_hProcessList, &lvi);
-
-        // PID (second column)
-        wchar_t pidStr[32];
-        swprintf_s(pidStr, L"%lu", proc.processId);
-        ListView_SetItemText(g_hProcessList, index, 1, pidStr);
-
-        // Window Title (third column)
-        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)proc.windowTitle.c_str());
-
-        // Path (fourth column)
-        ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)proc.executablePath.c_str());
-
-        // Restore checked state if this PID was previously checked
-        for (DWORD checkedPID : checkedPIDs) {
-            if (proc.processId == checkedPID) {
-                ListView_SetCheckState(g_hProcessList, index, TRUE);
-                break;
-            }
-        }
-
-        displayedCount++;
-    }
-
-    std::wstring statusMsg = L"Process list refreshed. Showing " + std::to_wstring(displayedCount) + L" process(es)";
-    if (showAudioOnly) {
-        statusMsg += L" with active audio";
-    }
-    statusMsg += L".";
-    SetWindowText(g_hStatusText, statusMsg.c_str());
-}
-
-void StartCapture() {
-    // Get all checked processes
-    std::vector<int> checkedIndices;
-
-    // If process capture is not supported, automatically capture system audio (PID 0)
-    if (!g_supportsProcessCapture) {
-        // Check if already capturing system audio
-        if (g_captureManager->IsCapturing(0)) {
-            MessageBox(g_hWnd, L"System audio is already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
-            return;
-        }
-        // Force system audio capture
-        checkedIndices.push_back(-1);  // Marker for system audio
-    } else {
-        // Normal process selection mode
-        int itemCount = ListView_GetItemCount(g_hProcessList);
-
-        for (int i = 0; i < itemCount; i++) {
-            if (ListView_GetCheckState(g_hProcessList, i)) {
-                checkedIndices.push_back(i);
-            }
-        }
-
-        // If no processes are checked, fall back to the currently focused/selected item
-        if (checkedIndices.empty()) {
-            int focusedIndex = ListView_GetNextItem(g_hProcessList, -1, LVNI_FOCUSED);
-            if (focusedIndex >= 0) {
-                checkedIndices.push_back(focusedIndex);
+    // For "Processes with Audio Sessions Only" filter, we need to check each process
+    if (filterIndex == 3) {
+        std::vector<AvailableSource> filteredSources;
+        for (const auto& source : g_availableSources) {
+            if (source.metadata.type == InputSourceType::Process) {
+                // Check if this process has active audio sessions
+                // Use ProcessEnumerator to check for active audio
+                ProcessInfo procInfo = g_sourceManager->FindProcessInfo(source.metadata.processId);
+                if (procInfo.hasActiveAudio) {
+                    filteredSources.push_back(source);
+                }
             } else {
-                MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
-                return;
+                // Keep non-process sources (shouldn't happen with this filter, but just in case)
+                filteredSources.push_back(source);
             }
         }
+        g_availableSources = filteredSources;
+    }
+
+    // Populate list
+    LVITEM lvi = {};
+    lvi.mask = LVIF_TEXT;
+    int displayIndex = 0;
+
+    for (size_t i = 0; i < g_availableSources.size(); i++) {
+        const auto& source = g_availableSources[i];
+
+        lvi.iItem = displayIndex++;
+        lvi.iSubItem = 0;
+        lvi.pszText = const_cast<LPWSTR>(source.metadata.displayName.c_str());
+        ListView_InsertItem(g_hInputSourcesList, &lvi);
+
+        // Set type column
+        const wchar_t* typeStr = L"Unknown";
+        switch (source.metadata.type) {
+        case InputSourceType::Process:
+            typeStr = L"Process";
+            break;
+        case InputSourceType::SystemAudio:
+            typeStr = L"System Audio";
+            break;
+        case InputSourceType::InputDevice:
+            typeStr = L"Microphone";
+            break;
+        }
+        ListView_SetItemText(g_hInputSourcesList, lvi.iItem, 1, const_cast<LPWSTR>(typeStr));
+    }
+
+    UpdateStatus(L"Found " + std::to_wstring(g_availableSources.size()) + L" input sources. Ready to capture.");
+}
+
+// Refresh the output destinations list
+void RefreshOutputDestinations() {
+    ListView_DeleteAllItems(g_hOutputDestsList);
+
+    // Get selected filter from combo box
+    int filterIndex = static_cast<int>(SendMessage(g_hOutputFilterCombo, CB_GETCURSEL, 0, 0));
+    if (filterIndex == CB_ERR) {
+        filterIndex = 0;  // Default to "All" if nothing selected
+    }
+    // 0 = All, 1 = File Formats, 2 = Output Devices
+
+    LVITEM lvi = {};
+    lvi.mask = LVIF_TEXT | LVIF_PARAM;  // Include LPARAM for storing destination metadata
+    int itemIndex = 0;
+
+    // Add file format destinations (if filter allows)
+    if (filterIndex == 0 || filterIndex == 1) {
+        lvi.iItem = itemIndex++;
+        lvi.iSubItem = 0;
+        lvi.pszText = (LPWSTR)L"WAV File";
+        lvi.lParam = MakeDestinationParam(0, 0);  // Type=0 (File), Index=0 (WAV)
+        ListView_InsertItem(g_hOutputDestsList, &lvi);
+        ListView_SetItemText(g_hOutputDestsList, lvi.iItem, 1, (LPWSTR)L"Uncompressed Audio");
+
+        lvi.iItem = itemIndex++;
+        lvi.pszText = (LPWSTR)L"MP3 File";
+        lvi.lParam = MakeDestinationParam(0, 1);  // Type=0 (File), Index=1 (MP3)
+        ListView_InsertItem(g_hOutputDestsList, &lvi);
+        ListView_SetItemText(g_hOutputDestsList, lvi.iItem, 1, (LPWSTR)L"Compressed Audio");
+
+        lvi.iItem = itemIndex++;
+        lvi.pszText = (LPWSTR)L"Opus File";
+        lvi.lParam = MakeDestinationParam(0, 2);  // Type=0 (File), Index=2 (Opus)
+        ListView_InsertItem(g_hOutputDestsList, &lvi);
+        ListView_SetItemText(g_hOutputDestsList, lvi.iItem, 1, (LPWSTR)L"Compressed Audio");
+
+        lvi.iItem = itemIndex++;
+        lvi.pszText = (LPWSTR)L"FLAC File";
+        lvi.lParam = MakeDestinationParam(0, 3);  // Type=0 (File), Index=3 (FLAC)
+        ListView_InsertItem(g_hOutputDestsList, &lvi);
+        ListView_SetItemText(g_hOutputDestsList, lvi.iItem, 1, (LPWSTR)L"Lossless Compression");
+    }
+
+    // Enumerate and add audio output devices (if filter allows)
+    if (filterIndex == 0 || filterIndex == 2) {
+        // Only re-enumerate devices if needed (or if we cleared them)
+        if (g_availableOutputDevices.empty() || filterIndex == 2) {
+            g_availableOutputDevices.clear();
+            if (g_deviceEnumerator->EnumerateDevices()) {
+                g_availableOutputDevices = g_deviceEnumerator->GetDevices();
+            }
+        }
+
+        for (size_t i = 0; i < g_availableOutputDevices.size(); i++) {
+            const auto& device = g_availableOutputDevices[i];
+            lvi.iItem = itemIndex++;
+            lvi.pszText = const_cast<LPWSTR>(device.friendlyName.c_str());
+            lvi.lParam = MakeDestinationParam(1, static_cast<int>(i));  // Type=1 (Device), Index=device index
+            ListView_InsertItem(g_hOutputDestsList, &lvi);
+
+            std::wstring typeStr = device.isDefault ? L"Audio Device (Default)" : L"Audio Device";
+            ListView_SetItemText(g_hOutputDestsList, lvi.iItem, 1, const_cast<LPWSTR>(typeStr.c_str()));
+        }
+    }
+}
+
+// Helper function to create a per-source session with separate files
+UINT32 CreatePerSourceSession(InputSourcePtr source, const WAVEFORMATEX* formatCopy, bool includeDevices) {
+    std::vector<OutputDestinationPtr> sourceDestinations;
+
+    // Get sanitized source name
+    InputSourceMetadata metadata = source->GetMetadata();
+    std::wstring sanitizedName = SanitizeFilename(metadata.displayName);
+
+    // Lambda to create destination (copied from StartCapture)
+    auto CreateDestination = [&](int formatIndex, const std::wstring& baseFilename) -> OutputDestinationPtr {
+        OutputDestinationPtr dest;
+        DestinationConfig config;
+        config.useTimestamp = true;
+
+        if (formatIndex == 0) {  // WAV
+            config.outputPath = g_activeOutputPath + L"\\" + baseFilename + L".wav";
+            dest = std::make_shared<WavFileDestination>();
+        }
+        else if (formatIndex == 1) {  // MP3
+            config.outputPath = g_activeOutputPath + L"\\" + baseFilename + L".mp3";
+            config.bitrate = g_activeBitrate;
+            dest = std::make_shared<Mp3FileDestination>();
+        }
+        else if (formatIndex == 2) {  // Opus
+            config.outputPath = g_activeOutputPath + L"\\" + baseFilename + L".opus";
+            config.bitrate = g_activeBitrate;
+            dest = std::make_shared<OpusFileDestination>();
+        }
+        else if (formatIndex == 3) {  // FLAC
+            config.outputPath = g_activeOutputPath + L"\\" + baseFilename + L".flac";
+            config.compressionLevel = g_activeFlacCompression;
+            dest = std::make_shared<FlacFileDestination>();
+        }
+
+        if (dest && dest->Configure(formatCopy, config)) {
+            return dest;
+        }
+        return nullptr;
+    };
+
+    // Create destinations with source-specific names
+    // Use CURRENTLY checked outputs from UI, not g_activeFileFormats/g_activeDeviceIndices
+    // (those only reflect what was checked at startup)
+    int destCount = ListView_GetItemCount(g_hOutputDestsList);
+    for (int i = 0; i < destCount; i++) {
+        if (ListView_GetCheckState(g_hOutputDestsList, i)) {
+            LVITEM lvi = {};
+            lvi.mask = LVIF_PARAM;
+            lvi.iItem = i;
+            if (ListView_GetItem(g_hOutputDestsList, &lvi)) {
+                int destType = GetDestinationType(lvi.lParam);
+                int destIndex = GetDestinationIndex(lvi.lParam);
+
+                if (destType == 0) {
+                    // File format
+                    std::wstring filename = sanitizedName + L"_capture";
+                    auto dest = CreateDestination(destIndex, filename);
+                    if (dest) {
+                        sourceDestinations.push_back(dest);
+                    }
+                }
+                else if (destType == 1 && includeDevices) {
+                    // Audio device (only add if includeDevices=true to avoid duplicates)
+                    if (destIndex >= 0 && destIndex < static_cast<int>(g_availableOutputDevices.size())) {
+                        OutputDestinationPtr dest = std::make_shared<DeviceOutputDestination>();
+                        DestinationConfig config;
+                        config.outputPath = g_availableOutputDevices[destIndex].deviceId;
+                        config.friendlyName = g_availableOutputDevices[destIndex].friendlyName;
+                        if (dest->Configure(formatCopy, config)) {
+                            sourceDestinations.push_back(dest);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (sourceDestinations.empty()) {
+        return 0;  // No destinations created
+    }
+
+    // Create session for this source
+    CaptureConfig config;
+    config.sources.push_back(source);
+    config.destinations = sourceDestinations;
+
+    UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+    if (sessionId != 0) {
+        // Track which source is in this per-source session
+        g_sessionToSources[sessionId] = { source->GetMetadata().id };
+
+        // Store destinations for real-time control
+        for (const auto& dest : sourceDestinations) {
+            g_activeDestinations[dest->GetName()] = dest;
+        }
+    }
+
+    return sessionId;
+}
+
+// Start capturing
+void StartCapture() {
+    if (g_isCapturing) {
+        return;
     }
 
     // Get output path
-    wchar_t outputPath[MAX_PATH];
-    GetWindowText(g_hOutputPath, outputPath, MAX_PATH);
+    wchar_t pathBuf[MAX_PATH];
+    GetWindowText(g_hOutputPath, pathBuf, MAX_PATH);
+    std::wstring outputPath = pathBuf;
 
-    // Get format
-    int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
-    AudioFormat format = AudioFormat::WAV;
-    const wchar_t* extension = L".wav";
-    UINT32 bitrate = 0;
-
-    switch (formatIndex) {
-    case 0:
-        format = AudioFormat::WAV;
-        extension = L".wav";
-        break;
-    case 1:
-        format = AudioFormat::MP3;
-        extension = L".mp3";
-        // Get MP3 bitrate from combo box
-        {
-            int bitrateIndex = (int)SendMessage(g_hMp3BitrateCombo, CB_GETCURSEL, 0, 0);
-            const UINT32 mp3Bitrates[] = { 128000, 192000, 256000, 320000 };
-            bitrate = (bitrateIndex >= 0 && bitrateIndex < 4) ? mp3Bitrates[bitrateIndex] : 192000;
-        }
-        break;
-    case 2:
-        format = AudioFormat::OPUS;
-        extension = L".opus";
-        // Get Opus bitrate from combo box
-        {
-            int bitrateIndex = (int)SendMessage(g_hOpusBitrateCombo, CB_GETCURSEL, 0, 0);
-            const UINT32 opusBitrates[] = { 64000, 96000, 128000, 192000, 256000 };
-            bitrate = (bitrateIndex >= 0 && bitrateIndex < 5) ? opusBitrates[bitrateIndex] : 128000;
-        }
-        break;
-    case 3:
-        format = AudioFormat::FLAC;
-        extension = L".flac";
-        // Get FLAC compression level from combo box (0-8)
-        {
-            int compressionIndex = (int)SendMessage(g_hFlacCompressionCombo, CB_GETCURSEL, 0, 0);
-            bitrate = (compressionIndex >= 0 && compressionIndex <= 8) ? compressionIndex : 5;
-        }
-        break;
-    default:
-        format = AudioFormat::WAV;
-        extension = L".wav";
-        break;
-    }
-
-    // Get skip silence option
-    bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    // Get passthrough option and device ID
-    bool enablePassthrough = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    std::wstring passthroughDeviceId;
-    if (enablePassthrough && g_audioDeviceEnum) {
-        int deviceIndex = (int)SendMessage(g_hPassthroughDeviceCombo, CB_GETCURSEL, 0, 0);
-        if (deviceIndex >= 0) {
-            const auto& devices = g_audioDeviceEnum->GetDevices();
-            if (deviceIndex < static_cast<int>(devices.size())) {
-                passthroughDeviceId = devices[deviceIndex].deviceId;
-            }
-        }
-    }
-
-    // Get monitor-only option
-    bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    // Check if microphone is enabled (counts as an additional source)
-    bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    // Calculate total number of audio sources (processes + microphone)
-    size_t totalSources = checkedIndices.size();
-    if (captureMicrophone && !monitorOnly) {
-        totalSources++; // Microphone counts as an additional source
-    }
-
-    // Get recording mode (only relevant if multiple sources and not monitor-only)
-    int recordingModeIndex = (int)SendMessage(g_hRecordingModeCombo, CB_GETCURSEL, 0, 0);
-    // 0 = Separate files, 1 = Combined file, 2 = Both
-
-    bool createSeparateFiles = (totalSources == 1) || (recordingModeIndex == 0) || (recordingModeIndex == 2);
-    bool createCombinedFile = (totalSources > 1) && !monitorOnly && ((recordingModeIndex == 1) || (recordingModeIndex == 2));
-
-    int startedCount = 0;
-    int alreadyCapturingCount = 0;
-
-    for (int checkedIndex : checkedIndices) {
-        std::wstring processName;
-        DWORD processId;
-
-        // If process capture not supported, use system audio defaults
-        if (!g_supportsProcessCapture) {
-            processName = L"[System Audio - All Processes]";
-            processId = 0;
-        } else {
-            // Get process info from ListView (not from g_processes, because system audio isn't in that vector)
-            wchar_t processNameBuf[256];
-            wchar_t pidStrBuf[32];
-
-            ListView_GetItemText(g_hProcessList, checkedIndex, 0, processNameBuf, 256);
-            ListView_GetItemText(g_hProcessList, checkedIndex, 1, pidStrBuf, 32);
-
-            processName = processNameBuf;
-            processId = (DWORD)_wtoi(pidStrBuf);
-        }
-
-        // Check if already capturing
-        if (g_captureManager->IsCapturing(processId)) {
-            alreadyCapturingCount++;
-            continue;
-        }
-
-        // Get current time for timestamp
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        wchar_t timestamp[64];
-        swprintf_s(timestamp, L"%04d_%02d_%02d-%02d_%02d_%02d",
-            st.wYear, st.wMonth, st.wDay,
-            st.wHour, st.wMinute, st.wSecond);
-
-        // Remove .exe extension from process name if present
-        std::wstring cleanProcessName = processName;
-        size_t exePos = cleanProcessName.find(L".exe");
-        if (exePos != std::wstring::npos) {
-            cleanProcessName = cleanProcessName.substr(0, exePos);
-        }
-
-        // Build full output path for separate file (if needed)
-        std::wstring fullPath;
-        bool captureMonitorOnly = monitorOnly;
-
-        if (createSeparateFiles && !monitorOnly) {
-            std::wstring basePath = outputPath;
-            if (basePath.back() != L'\\') {
-                basePath += L'\\';
-            }
-            fullPath = basePath + cleanProcessName + L"-" + timestamp + extension;
-        }
-        else {
-            // Monitor-only or combined-only mode, no separate file path needed
-            fullPath = L"";
-            // In combined-only mode, treat individual captures as monitor-only
-            if (!createSeparateFiles && createCombinedFile) {
-                captureMonitorOnly = true;
-            }
-        }
-
-        // Start capture with bitrate, skip silence option, passthrough device, and monitor-only mode
-        if (g_captureManager->StartCapture(processId, processName, fullPath, format, bitrate, skipSilence, passthroughDeviceId, captureMonitorOnly)) {
-            // Apply process volume setting (convert from 0-100 to 0.0-1.0)
-            auto sessions = g_captureManager->GetActiveSessions();
-            for (auto* session : sessions) {
-                if (session->processId == processId && session->capture) {
-                    session->capture->SetVolume(g_processVolume / 100.0f);
-                    break;
-                }
-            }
-            startedCount++;
-        }
-    }
-
-    // If combined file mode is enabled, start the mixer
-    if (createCombinedFile && startedCount > 0) {
-        // Build combined file path
-        std::wstring combinedPath = outputPath;
-        if (combinedPath.back() != L'\\') {
-            combinedPath += L'\\';
-        }
-
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        wchar_t timestamp[64];
-        swprintf_s(timestamp, L"%04d_%02d_%02d-%02d_%02d_%02d",
-            st.wYear, st.wMonth, st.wDay,
-            st.wHour, st.wMinute, st.wSecond);
-
-        combinedPath += L"Combined-" + std::wstring(timestamp) + extension;
-
-        // Enable mixed recording
-        if (!g_captureManager->EnableMixedRecording(combinedPath, format, bitrate)) {
-            MessageBox(g_hWnd, L"Failed to enable combined recording.", L"Warning", MB_OK | MB_ICONWARNING);
-        }
-    }
-
-    // Handle microphone capture if enabled (and not in monitor-only mode)
-    if (captureMicrophone && !monitorOnly && g_audioDeviceEnum) {
-        // Get microphone device ID
-        int micDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
-        const auto& inputDevices = g_audioDeviceEnum->GetInputDevices();
-
-        if (micDeviceIndex >= 0 && micDeviceIndex < static_cast<int>(inputDevices.size())) {
-            std::wstring micDeviceId = inputDevices[micDeviceIndex].deviceId;
-            std::wstring micDeviceName = inputDevices[micDeviceIndex].friendlyName;
-
-            // Use special process ID for microphone (0xFFFFFFFE)
-            DWORD micProcessId = 0xFFFFFFFE;
-
-            // Check if already capturing microphone
-            if (!g_captureManager->IsCapturing(micProcessId)) {
-                // Determine microphone capture mode based on recording mode
-                bool createMicFile = false;
-                bool micMonitorOnly = false;
-                std::wstring micFilePath;
-
-                if (createSeparateFiles) {
-                    // Separate files mode: Create mic file
-                    createMicFile = true;
-                }
-
-                if (createCombinedFile) {
-                    // Combined file mode: Send to mixer only (monitor-only mode)
-                    if (!createSeparateFiles) {
-                        // Combined only - microphone is monitor-only (sends to mixer)
-                        micMonitorOnly = true;
-                    }
-                    // If both createSeparateFiles and createCombinedFile are true (Both mode),
-                    // then createMicFile=true and micMonitorOnly=false, which means:
-                    // - Mic creates its own file
-                    // - Mic also sends to mixer (via OnAudioData callback)
-                }
-
-                // Build microphone file path if needed
-                if (createMicFile) {
-                    std::wstring basePath = outputPath;
-                    if (basePath.back() != L'\\') {
-                        basePath += L'\\';
-                    }
-
-                    // Get current time for timestamp
-                    SYSTEMTIME st;
-                    GetLocalTime(&st);
-                    wchar_t timestamp[64];
-                    swprintf_s(timestamp, L"%04d_%02d_%02d-%02d_%02d_%02d",
-                        st.wYear, st.wMonth, st.wDay,
-                        st.wHour, st.wMinute, st.wSecond);
-
-                    micFilePath = basePath + L"Microphone-" + std::wstring(timestamp) + extension;
-                } else {
-                    // Monitor-only mode, no file path needed
-                    micFilePath = L"";
-                }
-
-                // Start microphone capture
-                if (g_captureManager->StartCaptureFromDevice(
-                    micProcessId,
-                    micDeviceName,
-                    micDeviceId,
-                    true, // isInputDevice
-                    micFilePath,
-                    format,
-                    bitrate,
-                    skipSilence,
-                    micMonitorOnly)) {
-                    // Apply microphone volume setting (convert from 0-100 to 0.0-1.0)
-                    auto sessions = g_captureManager->GetActiveSessions();
-                    for (auto* session : sessions) {
-                        if (session->processId == micProcessId && session->capture) {
-                            session->capture->SetVolume(g_microphoneVolume / 100.0f);
-                            break;
-                        }
-                    }
-                    startedCount++;
-                }
-            }
-        }
-    }
-
-    if (startedCount > 0) {
-        EnableWindow(g_hStopBtn, TRUE);
-        UpdateRecordingList();
-        std::wstring status = L"Started " + std::to_wstring(startedCount) + L" capture(s)";
-        if (alreadyCapturingCount > 0) {
-            status += L" (" + std::to_wstring(alreadyCapturingCount) + L" already capturing)";
-        }
-        SetWindowText(g_hStatusText, status.c_str());
-    }
-    else if (alreadyCapturingCount > 0) {
-        MessageBox(g_hWnd, L"All selected processes are already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
-    }
-    else {
-        MessageBox(g_hWnd, L"Failed to start any captures.", L"Capture Error", MB_OK | MB_ICONERROR);
-    }
-}
-
-void StopCapture() {
-    // Get selected recording
-    int selectedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED);
-    if (selectedIndex < 0) {
-        MessageBox(g_hWnd, L"Please select a recording to stop.", L"No Recording Selected", MB_OK | MB_ICONWARNING);
+    if (outputPath.empty()) {
+        MessageBox(g_hWnd, L"Please specify an output folder", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
 
-    // Get PID from list view (column 1 now)
-    wchar_t pidStr[32];
-    ListView_GetItemText(g_hRecordingList, selectedIndex, 1, pidStr, 32);
-    DWORD processId = (DWORD)wcstoul(pidStr, nullptr, 10);
+    // Collect indices of checked input sources (not the sources themselves yet)
+    std::vector<int> checkedSourceIndices;
+    int itemCount = ListView_GetItemCount(g_hInputSourcesList);
 
-    if (g_captureManager->StopCapture(processId)) {
-        UpdateRecordingList();
-        SetWindowText(g_hStatusText, L"Capture stopped.");
-
-        auto sessions = g_captureManager->GetActiveSessions();
-        if (sessions.empty()) {
-            EnableWindow(g_hStopBtn, FALSE);
-            g_captureManager->DisableMixedRecording(); // Stop mixed recording if no more sessions
-        }
-
-        // Restore focus to appropriate control to prevent keyboard focus issues
-        if (g_supportsProcessCapture) {
-            SetFocus(g_hProcessList);
-        } else {
-            SetFocus(g_hStartBtn);
-        }
-    }
-}
-
-void UpdateRecordingList() {
-    // Save currently selected PID before updating
-    DWORD selectedPID = 0;
-    int selectedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED);
-    if (selectedIndex >= 0) {
-        wchar_t pidStr[32];
-        ListView_GetItemText(g_hRecordingList, selectedIndex, 1, pidStr, 32);
-        selectedPID = (DWORD)wcstoul(pidStr, nullptr, 10);
-    }
-
-    ListView_DeleteAllItems(g_hRecordingList);
-
-    auto sessions = g_captureManager->GetActiveSessions();
-    int newSelectedIndex = -1;
-
-    for (size_t i = 0; i < sessions.size(); i++) {
-        CaptureSession* session = sessions[i];
-
-        LVITEM lvi = {};
-        lvi.mask = LVIF_TEXT;
-        lvi.iItem = static_cast<int>(i);
-
-        // Process name (first column)
-        lvi.pszText = (LPWSTR)session->processName.c_str();
-        int index = ListView_InsertItem(g_hRecordingList, &lvi);
-
-        // PID (second column)
-        wchar_t pidStr[32];
-        swprintf_s(pidStr, L"%lu", session->processId);
-        ListView_SetItemText(g_hRecordingList, index, 1, pidStr);
-
-        // Output file (third column)
-        if (session->monitorOnly) {
-            ListView_SetItemText(g_hRecordingList, index, 2, (LPWSTR)L"[Monitor Only - No Recording]");
-        } else {
-            ListView_SetItemText(g_hRecordingList, index, 2, (LPWSTR)session->outputFile.c_str());
-        }
-
-        // Data written (fourth column)
-        if (session->monitorOnly) {
-            ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)L"N/A");
-        } else {
-            std::wstring sizeStr = FormatFileSize(session->bytesWritten);
-            ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)sizeStr.c_str());
-        }
-
-        // Check if this was the previously selected item
-        if (selectedIndex >= 0 && session->processId == selectedPID) {
-            newSelectedIndex = index;
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hInputSourcesList, i)) {
+            if (i < static_cast<int>(g_availableSources.size())) {
+                checkedSourceIndices.push_back(i);
+            }
         }
     }
 
-    // Restore selection if the item still exists
-    if (newSelectedIndex >= 0) {
-        ListView_SetItemState(g_hRecordingList, newSelectedIndex,
-            LVIS_SELECTED | LVIS_FOCUSED,
-            LVIS_SELECTED | LVIS_FOCUSED);
+    if (checkedSourceIndices.empty()) {
+        MessageBox(g_hWnd, L"Please select at least one input source", L"Error", MB_OK | MB_ICONWARNING);
+        return;
     }
 
-    // Show/enable Stop All, Pause All, and Resume All buttons if there are multiple captures
-    if (sessions.size() >= 2) {
-        ShowWindow(g_hStopAllBtn, SW_SHOW);
-        EnableWindow(g_hStopAllBtn, TRUE);
-        ShowWindow(g_hPauseAllBtn, SW_SHOW);
-        ShowWindow(g_hResumeAllBtn, SW_SHOW);
+    // Get item count for output destinations list
+    itemCount = ListView_GetItemCount(g_hOutputDestsList);
 
-        // Check pause state of all sessions to enable/disable buttons intelligently
-        int pausedCount = 0;
-        int resumedCount = 0;
-        for (auto* session : sessions) {
-            if (session->capture) {
-                if (session->capture->IsPaused()) {
-                    pausedCount++;
-                } else {
-                    resumedCount++;
+    // Create first source temporarily to get format
+    auto tempSource = g_sourceManager->CreateSource(g_availableSources[checkedSourceIndices[0]]);
+    if (!tempSource || !tempSource->StartCapture()) {
+        MessageBox(g_hWnd, L"Failed to initialize audio source", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Get format from first source (now available after StartCapture)
+    const WAVEFORMATEX* format = tempSource->GetFormat();
+    if (!format) {
+        tempSource->StopCapture();
+        MessageBox(g_hWnd, L"Failed to get audio format", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Make a copy of the format structure (including extra bytes for WAVEFORMATEXTENSIBLE)
+    // so it remains valid after we destroy the temp source
+    UINT32 formatSize = sizeof(WAVEFORMATEX) + format->cbSize;
+    std::vector<BYTE> formatBuffer(formatSize);
+    memcpy(formatBuffer.data(), format, formatSize);
+    const WAVEFORMATEX* formatCopy = reinterpret_cast<const WAVEFORMATEX*>(formatBuffer.data());
+
+    // Stop it - we'll create fresh sources for actual capture
+    tempSource->StopCapture();
+    tempSource.reset();
+
+    // Get bitrate and FLAC compression from controls
+    int bitrate = GetBitrate() * 1000;  // Convert kbps to bps
+    int flacCompression = GetFlacCompression();
+
+    // Get capture mode
+    int captureMode = GetCaptureMode();
+
+    // CRITICAL: Store capture mode and settings globally for dynamic source/dest addition
+    g_activeCaptureMode = captureMode;
+    g_activeOutputPath = outputPath;
+    g_activeBitrate = bitrate;
+    g_activeFlacCompression = flacCompression;
+    g_activeCaptureFormat = formatBuffer;  // Store format for dynamic destination addition
+
+    // Collect which file formats and devices are checked
+    std::vector<int> checkedFileFormats;  // format indices 0-3 for WAV/MP3/Opus/FLAC
+    std::vector<int> checkedDevices;      // device indices in g_availableOutputDevices
+
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hOutputDestsList, i)) {
+            // Get the destination metadata from lParam
+            LVITEM lvi = {};
+            lvi.mask = LVIF_PARAM;
+            lvi.iItem = i;
+            if (ListView_GetItem(g_hOutputDestsList, &lvi)) {
+                int destType = GetDestinationType(lvi.lParam);
+                int destIndex = GetDestinationIndex(lvi.lParam);
+
+                if (destType == 0) {  // File format
+                    checkedFileFormats.push_back(destIndex);
+                } else if (destType == 1) {  // Device
+                    checkedDevices.push_back(destIndex);
+                }
+            }
+        }
+    }
+
+    if (checkedFileFormats.empty() && checkedDevices.empty()) {
+        MessageBox(g_hWnd, L"Please select at least one output destination", L"Error", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    // Store checked formats and devices globally for dynamic addition
+    g_activeFileFormats = checkedFileFormats;
+    g_activeDeviceIndices = checkedDevices;
+
+    // Lambda helper to create a destination based on format index and filename
+    auto CreateDestination = [&](int formatIndex, const std::wstring& baseFilename) -> OutputDestinationPtr {
+        OutputDestinationPtr dest;
+        DestinationConfig config;
+        config.useTimestamp = true;
+
+        if (formatIndex == 0) {  // WAV
+            config.outputPath = outputPath + L"\\" + baseFilename + L".wav";
+            dest = std::make_shared<WavFileDestination>();
+        }
+        else if (formatIndex == 1) {  // MP3
+            config.outputPath = outputPath + L"\\" + baseFilename + L".mp3";
+            config.bitrate = bitrate;
+            dest = std::make_shared<Mp3FileDestination>();
+        }
+        else if (formatIndex == 2) {  // Opus
+            config.outputPath = outputPath + L"\\" + baseFilename + L".opus";
+            config.bitrate = bitrate;
+            dest = std::make_shared<OpusFileDestination>();
+        }
+        else if (formatIndex == 3) {  // FLAC
+            config.outputPath = outputPath + L"\\" + baseFilename + L".flac";
+            config.compressionLevel = flacCompression;
+            dest = std::make_shared<FlacFileDestination>();
+        }
+
+        if (dest && dest->Configure(formatCopy, config)) {
+            return dest;
+        }
+        return nullptr;
+    };
+
+    // Lambda to create device destinations
+    auto CreateDeviceDestinations = [&]() -> std::vector<OutputDestinationPtr> {
+        std::vector<OutputDestinationPtr> devDests;
+        for (int deviceIndex : checkedDevices) {
+            if (deviceIndex >= 0 && deviceIndex < static_cast<int>(g_availableOutputDevices.size())) {
+                OutputDestinationPtr dest = std::make_shared<DeviceOutputDestination>();
+                DestinationConfig config;
+                config.outputPath = g_availableOutputDevices[deviceIndex].deviceId;
+                config.friendlyName = g_availableOutputDevices[deviceIndex].friendlyName;
+                if (dest->Configure(formatCopy, config)) {
+                    devDests.push_back(dest);
+                }
+            }
+        }
+        return devDests;
+    };
+
+    g_activeSessionIds.clear();
+    g_activeSources.clear();  // Clear active source tracking
+    g_activeDestinations.clear();  // Clear active destination tracking
+    int totalDestinations = 0;
+
+    // Mode 0: Single File (mixed) - all sources to one set of destinations
+    if (captureMode == 0) {
+        std::vector<OutputDestinationPtr> allDestinations;
+
+        // Create one destination per checked format with "capture" name
+        for (int formatIdx : checkedFileFormats) {
+            auto dest = CreateDestination(formatIdx, L"capture");
+            if (dest) {
+                allDestinations.push_back(dest);
+            }
+        }
+
+        // Add device destinations
+        auto deviceDests = CreateDeviceDestinations();
+        allDestinations.insert(allDestinations.end(), deviceDests.begin(), deviceDests.end());
+
+        if (!allDestinations.empty()) {
+            // Create fresh sources for this session
+            std::vector<InputSourcePtr> sessionSources;
+            for (int srcIdx : checkedSourceIndices) {
+                auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+                if (source) {
+                    // Apply volume setting
+                    float volume = GetSourceVolume(source->GetMetadata().id);
+                    source->SetVolume(volume);
+                    sessionSources.push_back(source);
+                    // Store for real-time control
+                    g_activeSources[source->GetMetadata().id] = source;
+                }
+            }
+
+            if (!sessionSources.empty()) {
+                CaptureConfig config;
+                config.sources = sessionSources;
+                config.destinations = allDestinations;
+                // No routing rules = all sources go to all destinations
+
+                UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+                if (sessionId != 0) {
+                    g_activeSessionIds.push_back(sessionId);
+                    totalDestinations += static_cast<int>(allDestinations.size());
+
+                    // Track which sources are in this session
+                    std::vector<std::wstring> sourceIds;
+                    for (const auto& src : sessionSources) {
+                        sourceIds.push_back(src->GetMetadata().id);
+                    }
+                    g_sessionToSources[sessionId] = sourceIds;
+
+                    // Store destinations for real-time control
+                    for (const auto& dest : allDestinations) {
+                        g_activeDestinations[dest->GetName()] = dest;
+                    }
+                }
+            }
+        }
+    }
+    // Mode 1: Multiple Files - separate files for each source
+    else if (captureMode == 1) {
+        // Create one session per source
+        for (size_t i = 0; i < checkedSourceIndices.size(); i++) {
+            int srcIdx = checkedSourceIndices[i];
+            std::vector<OutputDestinationPtr> sourceDestinations;
+
+            // Create a fresh source for this session
+            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            if (!source) continue;
+
+            // Apply volume setting
+            float volume = GetSourceVolume(source->GetMetadata().id);
+            source->SetVolume(volume);
+
+            // Store for real-time control
+            g_activeSources[source->GetMetadata().id] = source;
+
+            // Get sanitized source name
+            InputSourceMetadata metadata = source->GetMetadata();
+            std::wstring sanitizedName = SanitizeFilename(metadata.displayName);
+
+            // Create file destinations with source-specific names
+            for (int formatIdx : checkedFileFormats) {
+                std::wstring filename = sanitizedName + L"_capture";
+                auto dest = CreateDestination(formatIdx, filename);
+                if (dest) {
+                    sourceDestinations.push_back(dest);
+                }
+            }
+
+            // Add device destinations only to first source (avoid duplicates)
+            if (i == 0) {
+                auto deviceDests = CreateDeviceDestinations();
+                sourceDestinations.insert(sourceDestinations.end(), deviceDests.begin(), deviceDests.end());
+            }
+
+            if (!sourceDestinations.empty()) {
+                CaptureConfig config;
+                config.sources.push_back(source);  // Only this fresh source
+                config.destinations = sourceDestinations;
+
+                UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+                if (sessionId != 0) {
+                    g_activeSessionIds.push_back(sessionId);
+                    totalDestinations += static_cast<int>(sourceDestinations.size());
+
+                    // Track which source is in this per-source session
+                    g_sessionToSources[sessionId] = { source->GetMetadata().id };
+
+                    // Store destinations for real-time control
+                    for (const auto& dest : sourceDestinations) {
+                        g_activeDestinations[dest->GetName()] = dest;
+                    }
+                }
+            }
+        }
+    }
+    // Mode 2: Both Modes - mixed file + separate files per source
+    // Use Mode 0 approach for mixed files, Mode 1 approach for per-source files
+    else if (captureMode == 2) {
+        // First: Create mixed file session (like Mode 0)
+        std::vector<OutputDestinationPtr> mixedDestinations;
+
+        for (int formatIdx : checkedFileFormats) {
+            auto dest = CreateDestination(formatIdx, L"capture");
+            if (dest) {
+                mixedDestinations.push_back(dest);
+            }
+        }
+
+        // Add device destinations
+        auto deviceDests = CreateDeviceDestinations();
+        mixedDestinations.insert(mixedDestinations.end(), deviceDests.begin(), deviceDests.end());
+
+        // CRITICAL: Always create mixed session in Mode 2, even with no destinations
+        // This allows destinations to be added dynamically later
+        // Create fresh sources for mixed session
+        std::vector<InputSourcePtr> mixedSources;
+        for (int srcIdx : checkedSourceIndices) {
+            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            if (source) {
+                // Apply volume setting
+                float volume = GetSourceVolume(source->GetMetadata().id);
+                source->SetVolume(volume);
+                mixedSources.push_back(source);
+                // Store for real-time control
+                g_activeSources[source->GetMetadata().id] = source;
+            }
+        }
+
+        if (!mixedSources.empty()) {
+            CaptureConfig config;
+            config.sources = mixedSources;
+            config.destinations = mixedDestinations;  // Can be empty - destinations can be added later
+            // No routing rules = all sources naturally write to all destinations (mixed by destinations)
+
+            UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+            if (sessionId != 0) {
+                g_activeSessionIds.push_back(sessionId);
+                totalDestinations += static_cast<int>(mixedDestinations.size());
+
+                // Track which sources are in this mixed session
+                std::vector<std::wstring> sourceIds;
+                for (const auto& src : mixedSources) {
+                    sourceIds.push_back(src->GetMetadata().id);
+                }
+                g_sessionToSources[sessionId] = sourceIds;
+
+                // Store destinations for real-time control
+                for (const auto& dest : mixedDestinations) {
+                    g_activeDestinations[dest->GetName()] = dest;
                 }
             }
         }
 
-        // Enable/disable buttons based on pause state
-        // If all are paused, disable Pause All button
-        // If all are resumed, disable Resume All button
-        EnableWindow(g_hPauseAllBtn, resumedCount > 0);
-        EnableWindow(g_hResumeAllBtn, pausedCount > 0);
-    } else {
-        ShowWindow(g_hStopAllBtn, SW_HIDE);
-        EnableWindow(g_hStopAllBtn, FALSE);
-        ShowWindow(g_hPauseAllBtn, SW_HIDE);
-        EnableWindow(g_hPauseAllBtn, FALSE);
-        ShowWindow(g_hResumeAllBtn, SW_HIDE);
-        EnableWindow(g_hResumeAllBtn, FALSE);
+        // Second: Create per-source sessions (like Mode 1)
+        for (size_t i = 0; i < checkedSourceIndices.size(); i++) {
+            int srcIdx = checkedSourceIndices[i];
+            std::vector<OutputDestinationPtr> sourceDestinations;
+
+            // Create a fresh source for this session
+            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            if (!source) continue;
+
+            // Apply volume setting
+            float volume = GetSourceVolume(source->GetMetadata().id);
+            source->SetVolume(volume);
+
+            // Store for real-time control
+            g_activeSources[source->GetMetadata().id] = source;
+
+            // Get sanitized source name
+            InputSourceMetadata metadata = source->GetMetadata();
+            std::wstring sanitizedName = SanitizeFilename(metadata.displayName);
+
+            // Create file destinations with source-specific names
+            for (int formatIdx : checkedFileFormats) {
+                std::wstring filename = sanitizedName + L"_capture";
+                auto dest = CreateDestination(formatIdx, filename);
+                if (dest) {
+                    sourceDestinations.push_back(dest);
+                }
+            }
+
+            // CRITICAL: Always create per-source session in Mode 2, even with no destinations
+            // This allows destinations to be added dynamically later
+            CaptureConfig config;
+            config.sources.push_back(source);
+            config.destinations = sourceDestinations;  // Can be empty
+
+            UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+            if (sessionId != 0) {
+                g_activeSessionIds.push_back(sessionId);
+                totalDestinations += static_cast<int>(sourceDestinations.size());
+
+                // Track which source is in this per-source session
+                g_sessionToSources[sessionId] = { source->GetMetadata().id };
+
+                // Store destinations for real-time control
+                for (const auto& dest : sourceDestinations) {
+                    g_activeDestinations[dest->GetName()] = dest;
+                }
+            }
+        }
     }
+
+    if (g_activeSessionIds.empty()) {
+        MessageBox(g_hWnd, L"Failed to start capture sessions", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    g_isCapturing = true;
+    SetWindowText(g_hStartStopBtn, L"Stop");
+
+    // Hide capture mode controls during capture
+    ShowWindow(g_hCaptureModeGroup, SW_HIDE);
+    ShowWindow(g_hRadioSingleFile, SW_HIDE);
+    ShowWindow(g_hRadioMultipleFiles, SW_HIDE);
+    ShowWindow(g_hRadioBothModes, SW_HIDE);
+
+    UpdateStatus(L"Capturing " + std::to_wstring(checkedSourceIndices.size()) + L" source(s) to " +
+                 std::to_wstring(totalDestinations) + L" destination(s) [" +
+                 std::to_wstring(g_activeSessionIds.size()) + L" sessions]");
 }
 
+// Stop capturing
+void StopCapture() {
+    if (!g_isCapturing) {
+        return;
+    }
+
+    // Stop all active sessions
+    for (UINT32 sessionId : g_activeSessionIds) {
+        if (sessionId != 0) {
+            g_captureManager->StopCaptureSession(sessionId);
+        }
+    }
+    g_activeSessionIds.clear();
+    g_activeSources.clear();  // Clear active source tracking
+    g_activeDestinations.clear();  // Clear active destination tracking
+    g_sessionToSources.clear();  // Clear session-to-source mapping
+
+    // Clear stored capture mode and settings
+    g_activeCaptureMode = -1;
+    g_activeFileFormats.clear();
+    g_activeDeviceIndices.clear();
+    g_activeOutputPath.clear();
+    g_activeBitrate = 0;
+    g_activeFlacCompression = 0;
+    g_activeCaptureFormat.clear();
+
+    g_isCapturing = false;
+    SetWindowText(g_hStartStopBtn, L"Start");
+
+    // Show capture mode controls again after capture stops
+    ShowWindow(g_hCaptureModeGroup, SW_SHOW);
+    ShowWindow(g_hRadioSingleFile, SW_SHOW);
+    ShowWindow(g_hRadioMultipleFiles, SW_SHOW);
+    ShowWindow(g_hRadioBothModes, SW_SHOW);
+
+    UpdateStatus(L"Capture stopped. Ready.");
+}
+
+// Browse for output folder
 void BrowseOutputFolder() {
-    IFileDialog* pfd = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
-    if (SUCCEEDED(hr)) {
-        DWORD dwOptions;
-        pfd->GetOptions(&dwOptions);
-        pfd->SetOptions(dwOptions | FOS_PICKFOLDERS);
+    BROWSEINFO bi = {};
+    bi.hwndOwner = g_hWnd;
+    bi.lpszTitle = L"Select Output Folder";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
-        hr = pfd->Show(g_hWnd);
-        if (SUCCEEDED(hr)) {
-            IShellItem* psi = nullptr;
-            hr = pfd->GetResult(&psi);
-            if (SUCCEEDED(hr)) {
-                PWSTR pszPath = nullptr;
-                hr = psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath);
-                if (SUCCEEDED(hr)) {
-                    SetWindowText(g_hOutputPath, pszPath);
-                    CoTaskMemFree(pszPath);
-                }
-                psi->Release();
-            }
+    LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
+    if (pidl != nullptr) {
+        wchar_t path[MAX_PATH];
+        if (SHGetPathFromIDList(pidl, path)) {
+            SetWindowText(g_hOutputPath, path);
         }
-        pfd->Release();
+        CoTaskMemFree(pidl);
     }
 }
 
+// Update status text
+void UpdateStatus(const std::wstring& message) {
+    SetWindowText(g_hStatusText, message.c_str());
+}
+
+// Get default output path
 std::wstring GetDefaultOutputPath() {
     wchar_t path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPath(nullptr, CSIDL_MYDOCUMENTS, nullptr, 0, path))) {
-        std::wstring docPath = path;
-        docPath += L"\\AudioCaptures";
-        CreateDirectory(docPath.c_str(), nullptr);
-        return docPath;
+    if (SHGetFolderPath(nullptr, CSIDL_MYDOCUMENTS, nullptr, 0, path) == S_OK) {
+        return std::wstring(path) + L"\\AudioCapture";
     }
-    return L"C:\\AudioCaptures";
+    return L"C:\\AudioCapture";
 }
 
-std::wstring FormatFileSize(UINT64 bytes) {
-    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
-    int unitIndex = 0;
-    double size = static_cast<double>(bytes);
-
-    while (size >= 1024.0 && unitIndex < 3) {
-        size /= 1024.0;
-        unitIndex++;
-    }
-
-    wchar_t buffer[64];
-    swprintf_s(buffer, L"%.2f %s", size, units[unitIndex]);
-    return buffer;
-}
-
-// Helper functions for string conversion
-std::string WStringToString(const std::wstring& wstr) {
+// Helper function to convert wstring to UTF-8 string
+std::string WStringToUTF8(const std::wstring& wstr) {
     if (wstr.empty()) return std::string();
-    int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string result(size - 1, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &result[0], size, nullptr, nullptr);
+
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+    if (size_needed <= 0) return std::string();
+
+    std::string result(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], size_needed, nullptr, nullptr);
     return result;
 }
 
-std::wstring StringToWString(const std::string& str) {
+// Helper function to convert UTF-8 string to wstring
+std::wstring UTF8ToWString(const std::string& str) {
     if (str.empty()) return std::wstring();
-    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
-    std::wstring result(size - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], size);
+
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
+    if (size_needed <= 0) return std::wstring();
+
+    std::wstring result(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &result[0], size_needed);
     return result;
 }
 
-std::wstring GetSettingsFilePath() {
+// Get settings file path (AppData\Local\AudioCapture\settings.json)
+std::wstring GetSettingsPath() {
     wchar_t path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPath(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
-        std::wstring settingsDir = path;
-        settingsDir += L"\\AudioCapture";
-        CreateDirectory(settingsDir.c_str(), nullptr);
+    if (SHGetFolderPath(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path) == S_OK) {
+        std::wstring settingsDir = std::wstring(path) + L"\\AudioCapture";
+
+        // Create directory if it doesn't exist
+        // Check if it already exists first to avoid error on success
+        DWORD attrib = GetFileAttributesW(settingsDir.c_str());
+        if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (!CreateDirectoryW(settingsDir.c_str(), nullptr)) {
+                DWORD error = GetLastError();
+                if (error != ERROR_ALREADY_EXISTS) {
+                    // Failed to create directory - log error
+                    OutputDebugStringW((L"Failed to create settings directory: " + std::to_wstring(error) + L"\n").c_str());
+                }
+            }
+        }
+
         return settingsDir + L"\\settings.json";
     }
-    return L"settings.json";
+    return L"settings.json";  // Fallback to current directory
 }
 
+// Load settings from JSON
 void LoadSettings() {
-    std::wstring settingsPath = GetSettingsFilePath();
-    std::ifstream file(settingsPath);
+    try {
+        std::wstring settingsPath = GetSettingsPath();
+        std::string pathStr = WStringToUTF8(settingsPath);
 
-    if (file.is_open()) {
+        std::ifstream file(pathStr, std::ios::binary);
+        if (!file.is_open()) {
+            // Settings file doesn't exist yet - this is normal on first run
+            OutputDebugStringW(L"Settings file not found (first run?)\n");
+            return;
+        }
+
+        json j;
         try {
-            json settings = json::parse(file);
+            file >> j;
+        }
+        catch (const std::exception& e) {
+            OutputDebugStringA(("Failed to parse settings JSON: " + std::string(e.what()) + "\n").c_str());
+            return;
+        }
 
-            // Load output path
-            if (settings.contains("outputPath") && settings["outputPath"].is_string()) {
-                std::string outputPath = settings["outputPath"];
-                SetWindowTextW(g_hOutputPath, StringToWString(outputPath).c_str());
+        if (j.contains("outputPath")) {
+            std::string outputPathUtf8 = j["outputPath"].get<std::string>();
+            std::wstring path = UTF8ToWString(outputPathUtf8);
+            SetWindowText(g_hOutputPath, path.c_str());
+        }
+
+        if (j.contains("bitrate")) {
+            int bitrate = j["bitrate"].get<int>();
+            SetWindowText(g_hBitrateEdit, std::to_wstring(bitrate).c_str());
+            SendMessage(g_hBitrateSpin, UDM_SETPOS, 0, bitrate);
+        }
+
+        if (j.contains("flacCompression")) {
+            int flacLevel = j["flacCompression"].get<int>();
+            SetWindowText(g_hFlacCompressionEdit, std::to_wstring(flacLevel).c_str());
+            SendMessage(g_hFlacCompressionSpin, UDM_SETPOS, 0, flacLevel);
+        }
+
+        if (j.contains("captureMode")) {
+            int mode = j["captureMode"].get<int>();
+            switch (mode) {
+            case 0:
+                SendMessage(g_hRadioSingleFile, BM_SETCHECK, BST_CHECKED, 0);
+                SendMessage(g_hRadioMultipleFiles, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessage(g_hRadioBothModes, BM_SETCHECK, BST_UNCHECKED, 0);
+                break;
+            case 1:
+                SendMessage(g_hRadioSingleFile, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessage(g_hRadioMultipleFiles, BM_SETCHECK, BST_CHECKED, 0);
+                SendMessage(g_hRadioBothModes, BM_SETCHECK, BST_UNCHECKED, 0);
+                break;
+            case 2:
+                SendMessage(g_hRadioSingleFile, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessage(g_hRadioMultipleFiles, BM_SETCHECK, BST_UNCHECKED, 0);
+                SendMessage(g_hRadioBothModes, BM_SETCHECK, BST_CHECKED, 0);
+                break;
             }
+        }
 
-            // Load format
-            if (settings.contains("format") && settings["format"].is_number_integer()) {
-                int formatIndex = settings["format"];
-                if (formatIndex >= 0 && formatIndex <= 3) {
-                    SendMessage(g_hFormatCombo, CB_SETCURSEL, formatIndex, 0);
+        // Load source volumes
+        if (j.contains("sourceVolumes") && j["sourceVolumes"].is_object()) {
+            g_sourceVolumes.clear();
+            for (auto& [key, value] : j["sourceVolumes"].items()) {
+                try {
+                    // Convert UTF-8 key to wide string
+                    std::wstring sourceId = UTF8ToWString(key);
+                    float volume = value.get<float>();
+
+                    // Validate volume range
+                    if (volume < 0.0f) volume = 0.0f;
+                    if (volume > 1.0f) volume = 1.0f;
+
+                    g_sourceVolumes[sourceId] = volume;
                 }
-            }
-
-            // Load MP3 bitrate
-            if (settings.contains("mp3Bitrate") && settings["mp3Bitrate"].is_number_integer()) {
-                int bitrateIndex = settings["mp3Bitrate"];
-                if (bitrateIndex >= 0 && bitrateIndex <= 3) {
-                    SendMessage(g_hMp3BitrateCombo, CB_SETCURSEL, bitrateIndex, 0);
-                }
-            }
-
-            // Load Opus bitrate
-            if (settings.contains("opusBitrate") && settings["opusBitrate"].is_number_integer()) {
-                int bitrateIndex = settings["opusBitrate"];
-                if (bitrateIndex >= 0 && bitrateIndex <= 4) {
-                    SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, bitrateIndex, 0);
-                }
-            }
-
-            // Load FLAC compression
-            if (settings.contains("flacCompression") && settings["flacCompression"].is_number_integer()) {
-                int compressionIndex = settings["flacCompression"];
-                if (compressionIndex >= 0 && compressionIndex <= 8) {
-                    SendMessage(g_hFlacCompressionCombo, CB_SETCURSEL, compressionIndex, 0);
-                }
-            }
-
-            // Load skip silence option
-            if (settings.contains("skipSilence") && settings["skipSilence"].is_boolean()) {
-                bool skipSilence = settings["skipSilence"];
-                SendMessage(g_hSkipSilenceCheckbox, BM_SETCHECK, skipSilence ? BST_CHECKED : BST_UNCHECKED, 0);
-            }
-
-            // Load passthrough (monitor audio) option
-            if (settings.contains("passthrough") && settings["passthrough"].is_boolean()) {
-                bool passthrough = settings["passthrough"];
-                SendMessage(g_hPassthroughCheckbox, BM_SETCHECK, passthrough ? BST_CHECKED : BST_UNCHECKED, 0);
-            }
-
-            // Load passthrough device index
-            if (settings.contains("passthroughDeviceIndex") && settings["passthroughDeviceIndex"].is_number_integer()) {
-                int deviceIndex = settings["passthroughDeviceIndex"];
-                // Will be applied after device enumeration completes
-                if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hPassthroughDeviceCombo, CB_GETCOUNT, 0, 0)) {
-                    SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
-                }
-            }
-
-            // Load monitor only option
-            if (settings.contains("monitorOnly") && settings["monitorOnly"].is_boolean()) {
-                bool monitorOnly = settings["monitorOnly"];
-                SendMessage(g_hMonitorOnlyCheckbox, BM_SETCHECK, monitorOnly ? BST_CHECKED : BST_UNCHECKED, 0);
-            }
-
-            // Load recording mode
-            if (settings.contains("recordingMode") && settings["recordingMode"].is_number_integer()) {
-                int recordingMode = settings["recordingMode"];
-                if (recordingMode >= 0 && recordingMode <= 2) {
-                    SendMessage(g_hRecordingModeCombo, CB_SETCURSEL, recordingMode, 0);
-                }
-            }
-
-            // Load microphone capture option
-            if (settings.contains("captureMicrophone") && settings["captureMicrophone"].is_boolean()) {
-                bool captureMicrophone = settings["captureMicrophone"];
-                SendMessage(g_hMicrophoneCheckbox, BM_SETCHECK, captureMicrophone ? BST_CHECKED : BST_UNCHECKED, 0);
-            }
-
-            // Load microphone device index
-            if (settings.contains("microphoneDeviceIndex") && settings["microphoneDeviceIndex"].is_number_integer()) {
-                int deviceIndex = settings["microphoneDeviceIndex"];
-                // Will be applied after device enumeration completes
-                if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hMicrophoneDeviceCombo, CB_GETCOUNT, 0, 0)) {
-                    SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
-                }
-            }
-
-            // Load process volume
-            if (settings.contains("processVolume") && settings["processVolume"].is_number()) {
-                float volume = settings["processVolume"];
-                if (volume >= 0.0f && volume <= 100.0f) {
-                    g_processVolume = volume;
-                    SendMessage(g_hProcessVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
-                    wchar_t volumeText[64];
-                    swprintf_s(volumeText, L"Process Volume: %d%%", (int)volume);
-                    SetWindowText(g_hProcessVolumeLabel, volumeText);
-                }
-            }
-
-            // Load microphone volume
-            if (settings.contains("microphoneVolume") && settings["microphoneVolume"].is_number()) {
-                float volume = settings["microphoneVolume"];
-                if (volume >= 0.0f && volume <= 100.0f) {
-                    g_microphoneVolume = volume;
-                    SendMessage(g_hMicrophoneVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
-                    wchar_t volumeText[64];
-                    swprintf_s(volumeText, L"Microphone Volume: %d%%", (int)volume);
-                    SetWindowText(g_hMicrophoneVolumeLabel, volumeText);
+                catch (const std::exception& e) {
+                    OutputDebugStringA(("Error loading volume for source: " + std::string(e.what()) + "\n").c_str());
                 }
             }
         }
-        catch (...) {
-            // If parsing fails, just use defaults
-        }
-        file.close();
+
+        OutputDebugStringW(L"Settings loaded successfully\n");
     }
-
-    // Update visibility of bitrate controls based on selected format
-    OnFormatChanged();
-
-    // Update visibility of passthrough controls
-    OnPassthroughCheckboxChanged();
-
-    // Update state of recording controls based on monitor-only
-    OnMonitorOnlyCheckboxChanged();
-
-    // Update visibility of microphone controls
-    OnMicrophoneCheckboxChanged();
+    catch (const std::exception& e) {
+        OutputDebugStringA(("Error loading settings: " + std::string(e.what()) + "\n").c_str());
+    }
+    catch (...) {
+        OutputDebugStringW(L"Unknown error loading settings\n");
+    }
 }
 
+// Save settings to JSON
 void SaveSettings() {
-    json settings;
+    try {
+        json j;
 
-    // Save output path
-    wchar_t outputPath[MAX_PATH];
-    GetWindowTextW(g_hOutputPath, outputPath, MAX_PATH);
-    settings["outputPath"] = WStringToString(outputPath);
+        // Get output path and convert to UTF-8
+        wchar_t pathBuf[MAX_PATH];
+        GetWindowText(g_hOutputPath, pathBuf, MAX_PATH);
+        std::wstring wPath = pathBuf;
+        std::string pathUtf8 = WStringToUTF8(wPath);
+        j["outputPath"] = pathUtf8;
 
-    // Save format
-    int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
-    settings["format"] = formatIndex;
+        j["bitrate"] = GetBitrate();
+        j["flacCompression"] = GetFlacCompression();
+        j["captureMode"] = GetCaptureMode();
 
-    // Save bitrates and compression
-    int mp3BitrateIndex = (int)SendMessage(g_hMp3BitrateCombo, CB_GETCURSEL, 0, 0);
-    settings["mp3Bitrate"] = mp3BitrateIndex;
+        // Save source volumes as JSON object (UTF-8 keys, float values)
+        json volumesObj = json::object();
+        for (const auto& [sourceId, volume] : g_sourceVolumes) {
+            // Convert wide string source ID to UTF-8
+            std::string sourceIdUtf8 = WStringToUTF8(sourceId);
+            volumesObj[sourceIdUtf8] = volume;
+        }
+        j["sourceVolumes"] = volumesObj;
 
-    int opusBitrateIndex = (int)SendMessage(g_hOpusBitrateCombo, CB_GETCURSEL, 0, 0);
-    settings["opusBitrate"] = opusBitrateIndex;
+        // Get settings path and convert to UTF-8
+        std::wstring settingsPath = GetSettingsPath();
+        std::string settingsPathUtf8 = WStringToUTF8(settingsPath);
 
-    int flacCompressionIndex = (int)SendMessage(g_hFlacCompressionCombo, CB_GETCURSEL, 0, 0);
-    settings["flacCompression"] = flacCompressionIndex;
+        // Open file in binary mode with explicit truncation
+        std::ofstream file(settingsPathUtf8, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            DWORD error = GetLastError();
+            OutputDebugStringW((L"Failed to open settings file for writing: " + std::to_wstring(error) + L"\n").c_str());
+            return;
+        }
 
-    // Save skip silence option
-    bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    settings["skipSilence"] = skipSilence;
+        // Write JSON and explicitly flush
+        std::string jsonStr = j.dump(4);
+        file.write(jsonStr.c_str(), jsonStr.size());
 
-    // Save passthrough (monitor audio) option
-    bool passthrough = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    settings["passthrough"] = passthrough;
+        if (!file.good()) {
+            OutputDebugStringW(L"Error writing settings JSON\n");
+            return;
+        }
 
-    // Save passthrough device index
-    int passthroughDeviceIndex = (int)SendMessage(g_hPassthroughDeviceCombo, CB_GETCURSEL, 0, 0);
-    settings["passthroughDeviceIndex"] = passthroughDeviceIndex;
-
-    // Save monitor only option
-    bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    settings["monitorOnly"] = monitorOnly;
-
-    // Save recording mode
-    int recordingMode = (int)SendMessage(g_hRecordingModeCombo, CB_GETCURSEL, 0, 0);
-    settings["recordingMode"] = recordingMode;
-
-    // Save microphone capture option
-    bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    settings["captureMicrophone"] = captureMicrophone;
-
-    // Save microphone device index
-    int microphoneDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
-    settings["microphoneDeviceIndex"] = microphoneDeviceIndex;
-
-    // Save volume settings
-    settings["processVolume"] = g_processVolume;
-    settings["microphoneVolume"] = g_microphoneVolume;
-
-    // Write to file
-    std::wstring settingsPath = GetSettingsFilePath();
-    std::ofstream file(settingsPath);
-    if (file.is_open()) {
-        file << settings.dump(4); // Pretty print with 4 spaces
+        // Explicit flush and close
+        file.flush();
         file.close();
-    }
-}
 
-void OnFormatChanged() {
-    int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
-
-    // Hide all bitrate/compression controls first
-    ShowWindow(g_hMp3BitrateLabel, SW_HIDE);
-    ShowWindow(g_hMp3BitrateCombo, SW_HIDE);
-    ShowWindow(g_hOpusBitrateLabel, SW_HIDE);
-    ShowWindow(g_hOpusBitrateCombo, SW_HIDE);
-    ShowWindow(g_hFlacCompressionLabel, SW_HIDE);
-    ShowWindow(g_hFlacCompressionCombo, SW_HIDE);
-
-    // Show appropriate control based on format
-    switch (formatIndex) {
-    case 1: // MP3
-        ShowWindow(g_hMp3BitrateLabel, SW_SHOW);
-        ShowWindow(g_hMp3BitrateCombo, SW_SHOW);
-        break;
-    case 2: // Opus
-        ShowWindow(g_hOpusBitrateLabel, SW_SHOW);
-        ShowWindow(g_hOpusBitrateCombo, SW_SHOW);
-        break;
-    case 3: // FLAC
-        ShowWindow(g_hFlacCompressionLabel, SW_SHOW);
-        ShowWindow(g_hFlacCompressionCombo, SW_SHOW);
-        break;
-    }
-}
-
-void PopulatePassthroughDevices() {
-    if (!g_audioDeviceEnum) {
-        return;
-    }
-
-    // Enumerate audio devices
-    if (!g_audioDeviceEnum->EnumerateDevices()) {
-        return;
-    }
-
-    // Clear existing items
-    SendMessage(g_hPassthroughDeviceCombo, CB_RESETCONTENT, 0, 0);
-
-    // Add devices to combo box
-    const auto& devices = g_audioDeviceEnum->GetDevices();
-    int defaultIndex = -1;
-
-    for (size_t i = 0; i < devices.size(); i++) {
-        const AudioDeviceInfo& device = devices[i];
-
-        // Format name with (Default) suffix if it's the default device
-        std::wstring displayName = device.friendlyName;
-        if (device.isDefault) {
-            displayName += L" (Default)";
-            defaultIndex = static_cast<int>(i);
+        if (file.fail()) {
+            OutputDebugStringW(L"Error flushing/closing settings file\n");
+            return;
         }
 
-        SendMessage(g_hPassthroughDeviceCombo, CB_ADDSTRING, 0, (LPARAM)displayName.c_str());
-        // Store device index as item data
-        SendMessage(g_hPassthroughDeviceCombo, CB_SETITEMDATA, i, (LPARAM)i);
+        OutputDebugStringW(L"Settings saved successfully\n");
     }
-
-    // Select default device
-    if (defaultIndex >= 0) {
-        SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, defaultIndex, 0);
-    } else if (devices.size() > 0) {
-        SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, 0, 0);
+    catch (const std::exception& e) {
+        OutputDebugStringA(("Error saving settings: " + std::string(e.what()) + "\n").c_str());
     }
-
-    // Initially hide passthrough controls
-    OnPassthroughCheckboxChanged();
-}
-
-void OnPassthroughCheckboxChanged() {
-    // Show/hide device selector based on checkbox state
-    BOOL isChecked = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-    ShowWindow(g_hPassthroughDeviceLabel, isChecked ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hPassthroughDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
-
-    // Enable/disable monitor-only checkbox based on monitoring state
-    EnableWindow(g_hMonitorOnlyCheckbox, isChecked);
-
-    // If monitoring is disabled, uncheck monitor-only
-    if (!isChecked && SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-        SendMessage(g_hMonitorOnlyCheckbox, BM_SETCHECK, BST_UNCHECKED, 0);
-        OnMonitorOnlyCheckboxChanged(); // Update dependent controls
+    catch (...) {
+        OutputDebugStringW(L"Unknown error saving settings\n");
     }
 }
 
-void OnMonitorOnlyCheckboxChanged() {
-    // Enable/disable recording-specific controls based on monitor-only state
-    BOOL isMonitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    BOOL enableRecordingControls = !isMonitorOnly;
-
-    // Disable format selection
-    EnableWindow(g_hFormatCombo, enableRecordingControls);
-
-    // Disable bitrate/compression controls
-    EnableWindow(g_hMp3BitrateCombo, enableRecordingControls);
-    EnableWindow(g_hOpusBitrateCombo, enableRecordingControls);
-    EnableWindow(g_hFlacCompressionCombo, enableRecordingControls);
-
-    // Disable output path controls
-    EnableWindow(g_hOutputPath, enableRecordingControls);
-    EnableWindow(g_hBrowseBtn, enableRecordingControls);
-
-    // Disable skip silence option (only relevant for recording)
-    EnableWindow(g_hSkipSilenceCheckbox, enableRecordingControls);
-
-    // Show/hide recording mode controls (only relevant when recording)
-    ShowWindow(g_hRecordingModeLabel, enableRecordingControls ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hRecordingModeCombo, enableRecordingControls ? SW_SHOW : SW_HIDE);
+// Get bitrate from control (in kbps)
+int GetBitrate() {
+    wchar_t buf[16];
+    GetWindowText(g_hBitrateEdit, buf, 16);
+    int bitrate = _wtoi(buf);
+    if (bitrate < 64) bitrate = 64;
+    if (bitrate > 320) bitrate = 320;
+    return bitrate;
 }
 
-void PopulateMicrophoneDevices() {
-    if (!g_audioDeviceEnum) {
-        return;
-    }
+// Get FLAC compression level from control (0-8)
+int GetFlacCompression() {
+    wchar_t buf[16];
+    GetWindowText(g_hFlacCompressionEdit, buf, 16);
+    int level = _wtoi(buf);
+    if (level < 0) level = 0;
+    if (level > 8) level = 8;
+    return level;
+}
 
-    // Enumerate input devices
-    if (!g_audioDeviceEnum->EnumerateInputDevices()) {
-        return;
-    }
+// Update visibility of bitrate and FLAC controls based on selected outputs
+void UpdateControlVisibility() {
+    int itemCount = ListView_GetItemCount(g_hOutputDestsList);
+    bool showBitrate = false;
+    bool showFlac = false;
 
-    // Clear existing items
-    SendMessage(g_hMicrophoneDeviceCombo, CB_RESETCONTENT, 0, 0);
+    // Check which output formats are selected
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hOutputDestsList, i)) {
+            // Get the destination metadata from lParam
+            LVITEM lvi = {};
+            lvi.mask = LVIF_PARAM;
+            lvi.iItem = i;
+            if (ListView_GetItem(g_hOutputDestsList, &lvi)) {
+                int destType = GetDestinationType(lvi.lParam);
+                int destIndex = GetDestinationIndex(lvi.lParam);
 
-    // Add devices to combo box
-    const auto& devices = g_audioDeviceEnum->GetInputDevices();
-    int defaultIndex = -1;
-
-    for (size_t i = 0; i < devices.size(); i++) {
-        const AudioDeviceInfo& device = devices[i];
-
-        // Format name with (Default) suffix if it's the default device
-        std::wstring displayName = device.friendlyName;
-        if (device.isDefault) {
-            displayName += L" (Default)";
-            defaultIndex = static_cast<int>(i);
+                if (destType == 0) {  // File format
+                    if (destIndex == 1 || destIndex == 2) {  // MP3 or Opus
+                        showBitrate = true;
+                    }
+                    if (destIndex == 3) {  // FLAC
+                        showFlac = true;
+                    }
+                }
+            }
         }
-
-        SendMessage(g_hMicrophoneDeviceCombo, CB_ADDSTRING, 0, (LPARAM)displayName.c_str());
-        // Store device index as item data
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETITEMDATA, i, (LPARAM)i);
     }
 
-    // Select default device
-    if (defaultIndex >= 0) {
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, defaultIndex, 0);
-    } else if (devices.size() > 0) {
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, 0, 0);
-    }
+    // Show/hide bitrate controls
+    int bitrateShow = showBitrate ? SW_SHOW : SW_HIDE;
+    ShowWindow(GetDlgItem(g_hWnd, 0x1000), bitrateShow);  // Static label
+    ShowWindow(g_hBitrateEdit, bitrateShow);
+    ShowWindow(g_hBitrateSpin, bitrateShow);
 
-    // Initially hide microphone controls
-    OnMicrophoneCheckboxChanged();
+    // Show/hide FLAC controls
+    int flacShow = showFlac ? SW_SHOW : SW_HIDE;
+    ShowWindow(GetDlgItem(g_hWnd, 0x1001), flacShow);  // Static label
+    ShowWindow(g_hFlacCompressionEdit, flacShow);
+    ShowWindow(g_hFlacCompressionSpin, flacShow);
 }
 
-void OnMicrophoneCheckboxChanged() {
-    // Show/hide device selector and volume controls based on checkbox state
-    BOOL isChecked = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+// Get selected capture mode
+// Returns: 0 = Single File, 1 = Multiple Files, 2 = Both Modes
+int GetCaptureMode() {
+    if (SendMessage(g_hRadioSingleFile, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        return 0;  // Single File Mode
+    }
+    else if (SendMessage(g_hRadioMultipleFiles, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        return 1;  // Multiple Files Mode
+    }
+    else if (SendMessage(g_hRadioBothModes, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        return 2;  // Both Modes
+    }
+    return 0;  // Default to Single File
+}
 
-    ShowWindow(g_hMicrophoneDeviceLabel, isChecked ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hMicrophoneDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hMicrophoneVolumeLabel, isChecked ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hMicrophoneVolumeSlider, isChecked ? SW_SHOW : SW_HIDE);
+// Sanitize source name for safe filename usage
+std::wstring SanitizeFilename(const std::wstring& displayName) {
+    std::wstring sanitized = displayName;
+
+    // Remove common bracketed markers like [Input], [Output], [Loopback], etc.
+    size_t pos = 0;
+    while ((pos = sanitized.find(L'[')) != std::wstring::npos) {
+        size_t endPos = sanitized.find(L']', pos);
+        if (endPos != std::wstring::npos) {
+            sanitized.erase(pos, endPos - pos + 1);
+        } else {
+            break;
+        }
+    }
+
+    // Replace invalid filename characters with underscores
+    const wchar_t invalidChars[] = L"<>:\"/\\|?*";
+    for (wchar_t c : invalidChars) {
+        std::replace(sanitized.begin(), sanitized.end(), c, L'_');
+    }
+
+    // Also replace control characters (0-31) and some other problematic chars
+    for (size_t i = 0; i < sanitized.length(); i++) {
+        if (sanitized[i] < 32 || sanitized[i] == 127) {
+            sanitized[i] = L'_';
+        }
+    }
+
+    // Trim leading/trailing whitespace and dots (Windows doesn't like them)
+    size_t start = 0;
+    size_t end = sanitized.length();
+
+    while (start < end && (sanitized[start] == L' ' || sanitized[start] == L'\t' || sanitized[start] == L'.')) {
+        start++;
+    }
+
+    while (end > start && (sanitized[end-1] == L' ' || sanitized[end-1] == L'\t' || sanitized[end-1] == L'.')) {
+        end--;
+    }
+
+    sanitized = sanitized.substr(start, end - start);
+
+    // Ensure we have a valid name (not empty)
+    if (sanitized.empty()) {
+        sanitized = L"capture";
+    }
+
+    // Truncate if too long (Windows has 255 char limit, leave room for path and extension)
+    if (sanitized.length() > 100) {
+        sanitized = sanitized.substr(0, 100);
+    }
+
+    return sanitized;
+}
+
+// Update volume controls based on focused input source
+void UpdateVolumeControls() {
+    // Get focused item from input sources list
+    int focusedIndex = ListView_GetNextItem(g_hInputSourcesList, -1, LVNI_FOCUSED);
+
+    // Check if item is valid and checked
+    if (focusedIndex >= 0 && focusedIndex < static_cast<int>(g_availableSources.size())) {
+        BOOL isChecked = ListView_GetCheckState(g_hInputSourcesList, focusedIndex);
+
+        if (isChecked) {
+            // Get source information
+            const auto& source = g_availableSources[focusedIndex];
+
+            // Show volume controls (not showing g_hVolumeValue anymore - percentage is in label)
+            ShowWindow(g_hVolumeLabel, SW_SHOW);
+            ShowWindow(g_hVolumeSlider, SW_SHOW);
+
+            // Get volume from map (default 100 if not found)
+            float volume = GetSourceVolume(source.metadata.id);
+            int sliderPos = static_cast<int>(volume * 100.0f);
+
+            // Clamp to valid range
+            if (sliderPos < 0) sliderPos = 0;
+            if (sliderPos > 100) sliderPos = 100;
+
+            // Update label with source name AND percentage
+            std::wstring labelText = L"Volume for: " + source.metadata.displayName + L" (" + std::to_wstring(sliderPos) + L"%)";
+            SetWindowText(g_hVolumeLabel, labelText.c_str());
+
+            // Update slider position
+            SendMessage(g_hVolumeSlider, TBM_SETPOS, TRUE, sliderPos);
+        } else {
+            // Not checked - hide controls and clear text
+            SetWindowText(g_hVolumeLabel, L"");
+            ShowWindow(g_hVolumeLabel, SW_HIDE);
+            ShowWindow(g_hVolumeSlider, SW_HIDE);
+        }
+    } else {
+        // No valid selection - hide controls and clear text
+        SetWindowText(g_hVolumeLabel, L"");
+        ShowWindow(g_hVolumeLabel, SW_HIDE);
+        ShowWindow(g_hVolumeSlider, SW_HIDE);
+    }
+}
+
+// Handle volume slider changes
+void OnVolumeSliderChanged() {
+    // Get focused item from input sources list
+    int focusedIndex = ListView_GetNextItem(g_hInputSourcesList, -1, LVNI_FOCUSED);
+
+    // Check if item is valid and checked
+    if (focusedIndex >= 0 && focusedIndex < static_cast<int>(g_availableSources.size())) {
+        BOOL isChecked = ListView_GetCheckState(g_hInputSourcesList, focusedIndex);
+
+        if (isChecked) {
+            // Get slider position (0-100)
+            int sliderPos = static_cast<int>(SendMessage(g_hVolumeSlider, TBM_GETPOS, 0, 0));
+
+            // Clamp to valid range
+            if (sliderPos < 0) sliderPos = 0;
+            if (sliderPos > 100) sliderPos = 100;
+
+            // Convert to float (0.0-1.0)
+            float volume = sliderPos / 100.0f;
+
+            // Get source ID and update volume
+            const auto& source = g_availableSources[focusedIndex];
+            SetSourceVolume(source.metadata.id, volume);
+
+            // Update label with source name AND percentage
+            std::wstring labelText = L"Volume for: " + source.metadata.displayName + L" (" + std::to_wstring(sliderPos) + L"%)";
+            SetWindowText(g_hVolumeLabel, labelText.c_str());
+
+            // If capturing, apply volume change to active sources in real-time
+            if (g_isCapturing) {
+                auto it = g_activeSources.find(source.metadata.id);
+                if (it != g_activeSources.end() && it->second) {
+                    it->second->SetVolume(volume);
+                }
+            }
+        }
+    }
+}
+
+// Get volume for a source (default 1.0 if not found)
+float GetSourceVolume(const std::wstring& sourceId) {
+    auto it = g_sourceVolumes.find(sourceId);
+    if (it != g_sourceVolumes.end()) {
+        return it->second;
+    }
+    return 1.0f;  // Default volume = 100%
+}
+
+// Set volume for a source
+void SetSourceVolume(const std::wstring& sourceId, float volume) {
+    // Clamp volume to valid range
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+
+    g_sourceVolumes[sourceId] = volume;
 }

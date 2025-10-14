@@ -9,6 +9,12 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <algorithm>
+#include <mutex>
+
+// CRITICAL FIX: Global mutex to serialize WASAPI Initialize/Start operations
+// Multiple sources calling IAudioClient::Initialize() simultaneously causes audio glitches
+// This mutex ensures WASAPI operations happen one at a time to avoid driver conflicts
+static std::mutex g_wasapiMutex;
 
 //=============================================================================
 // AudioClientActivationHandler Implementation
@@ -551,10 +557,20 @@ bool AudioCapture::Start() {
         return false;
     }
 
-    // Start audio client
-    HRESULT hr = m_audioClient->Start();
-    if (FAILED(hr)) {
-        return false;
+    // CRITICAL FIX: Serialize WASAPI Start() calls to avoid audio driver conflicts
+    // When multiple sources start simultaneously, they compete for audio hardware resources
+    // causing glitches in ALL active streams
+    {
+        std::lock_guard<std::mutex> lock(g_wasapiMutex);
+
+        // Start audio client
+        HRESULT hr = m_audioClient->Start();
+        if (FAILED(hr)) {
+            return false;
+        }
+
+        // Small delay to let WASAPI stabilize before starting capture thread
+        Sleep(50);
     }
 
     m_isCapturing = true;
@@ -702,15 +718,24 @@ void AudioCapture::CaptureThread() {
             // Send data to callback - even if silent, send zeros to keep stream continuous
             if (m_dataCallback && bufferSize > 0) {
                 if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                    // For silent buffers, send zeros
-                    std::vector<BYTE> silence(bufferSize, 0);
-                    m_dataCallback(silence.data(), bufferSize);
+                    // For silent buffers, send zeros using pre-allocated buffer
+                    if (m_silenceBuffer.size() < bufferSize) {
+                        m_silenceBuffer.resize(bufferSize, 0);
+                    }
+                    // Fill with zeros (memset is faster than resize with initialization)
+                    memset(m_silenceBuffer.data(), 0, bufferSize);
+                    m_dataCallback(m_silenceBuffer.data(), bufferSize);
                 }
                 else if (data) {
-                    // Apply volume adjustment
-                    std::vector<BYTE> buffer(data, data + bufferSize);
-                    ApplyVolumeToBuffer(buffer.data(), bufferSize);
-                    m_dataCallback(buffer.data(), bufferSize);
+                    // Use pre-allocated buffer to avoid allocation in audio callback
+                    if (m_captureBuffer.size() < bufferSize) {
+                        m_captureBuffer.resize(bufferSize);
+                    }
+                    // Copy data to our buffer
+                    memcpy(m_captureBuffer.data(), data, bufferSize);
+                    // Apply volume adjustment in-place
+                    ApplyVolumeToBuffer(m_captureBuffer.data(), bufferSize);
+                    m_dataCallback(m_captureBuffer.data(), bufferSize);
 
                     // If passthrough is enabled, also send to render device
                     if (m_passthroughEnabled && m_audioRenderClient && m_renderClient) {
@@ -729,9 +754,9 @@ void AudioCapture::CaptureThread() {
                             if (framesToWrite > 0) {
                                 BYTE* renderBuffer = nullptr;
                                 if (SUCCEEDED(m_audioRenderClient->GetBuffer(framesToWrite, &renderBuffer))) {
-                                    // Copy audio data to render buffer
+                                    // Copy audio data to render buffer from our pre-allocated buffer
                                     UINT32 bytesToCopy = framesToWrite * m_waveFormat->nBlockAlign;
-                                    memcpy(renderBuffer, buffer.data(), bytesToCopy);
+                                    memcpy(renderBuffer, m_captureBuffer.data(), bytesToCopy);
 
                                     m_audioRenderClient->ReleaseBuffer(framesToWrite, 0);
                                 }

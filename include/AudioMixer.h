@@ -24,13 +24,21 @@ public:
     // Returns true if there's data available, false otherwise
     bool GetMixedAudio(std::vector<BYTE>& outBuffer);
 
+    // Remove a specific source from the mixer
+    void RemoveSource(DWORD sourceId);
+
     // Clear all pending audio data
     void Clear();
+
+    // Get the mixer's target format
+    const WAVEFORMATEX& GetFormat() const { return m_format; }
 
 private:
     struct AudioBuffer {
         std::vector<BYTE> data;
         UINT32 readPosition;
+        WAVEFORMATEX sourceFormat;  // Format of this source (may differ from mixer format)
+        std::vector<BYTE> resampleBuffer;  // Pre-allocated buffer for resampling (avoids allocation in callback)
     };
 
     WAVEFORMATEX m_format;  // Target output format
@@ -42,5 +50,7 @@ private:
     void MixSamples(const std::vector<const BYTE*>& sources, BYTE* dest, UINT32 frameCount);
 
     // Resample audio from source format to target format using linear interpolation
-    std::vector<BYTE> ResampleAudio(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat);
+    // Writes into pre-allocated destBuffer to avoid heap allocations
+    bool ResampleAudioInPlace(const BYTE* data, UINT32 size, const WAVEFORMATEX* sourceFormat,
+                              BYTE* destBuffer, UINT32 destSize);
 };

@@ -25,6 +25,20 @@ set(SOURCES
     src/CaptureManager.cpp
     src/AudioDeviceEnumerator.cpp
     src/AudioMixer.cpp
+    # InputSource architecture
+    src/ProcessInputSource.cpp
+    src/SystemAudioInputSource.cpp
+    src/InputDeviceSource.cpp
+    src/InputSourceManager.cpp
+    # OutputDestination architecture
+    src/OutputDestination.cpp
+    src/FileOutputDestination.cpp
+    src/WavFileDestination.cpp
+    src/Mp3FileDestination.cpp
+    src/OpusFileDestination.cpp
+    src/FlacFileDestination.cpp
+    src/DeviceOutputDestination.cpp
+    src/OutputDestinationManager.cpp
 )
 
 set(HEADERS
@@ -37,6 +51,21 @@ set(HEADERS
     include/CaptureManager.h
     include/AudioDeviceEnumerator.h
     include/AudioMixer.h
+    # InputSource architecture
+    include/InputSource.h
+    include/ProcessInputSource.h
+    include/SystemAudioInputSource.h
+    include/InputDeviceSource.h
+    include/InputSourceManager.h
+    # OutputDestination architecture
+    include/OutputDestination.h
+    include/FileOutputDestination.h
+    include/WavFileDestination.h
+    include/Mp3FileDestination.h
+    include/OpusFileDestination.h
+    include/FlacFileDestination.h
+    include/DeviceOutputDestination.h
+    include/OutputDestinationManager.h
     include/resource.h
 )
 

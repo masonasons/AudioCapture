@@ -89,6 +89,10 @@ private:
     IAudioClient* m_renderClient;
     IAudioRenderClient* m_audioRenderClient;
     UINT32 m_renderBufferFrameCount;
+
+    // Pre-allocated buffer for capture thread (avoids allocation in audio callback)
+    std::vector<BYTE> m_captureBuffer;
+    std::vector<BYTE> m_silenceBuffer;
 };
 
 // COM completion handler for async audio interface activation
