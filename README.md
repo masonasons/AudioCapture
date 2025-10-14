@@ -27,7 +27,15 @@ A powerful Windows audio capture application for recording and mixing multiple a
 - **Windows 10 Build 19041+ (Version 2004)** - Required for per-application capture feature
 - No additional software or drivers required
 
-**Note:** On Windows 7/8/8.1 and early Windows 10 builds, only System Audio and Input Devices (microphones) will be available. Per-application capture requires Windows 10 Version 2004 or later.
+**Important Note About Per-Application Capture:**
+
+Per-application capture requires Windows 10 Version 2004 (Build 19041) or later. However, even with the correct Windows version, this feature may not work on all systems due to:
+
+- **Audio driver compatibility** - Some audio drivers don't fully support Windows loopback features
+- **Windows Update level** - Certain KB updates are required for full functionality
+- **Audio device hardware** - Older audio hardware may not support this feature
+
+If per-application capture fails, AudioCapture will automatically fall back to system-wide audio capture and display a detailed error message explaining why. On Windows 7/8/8.1 and early Windows 10 builds, only System Audio and Input Devices (microphones) will be available.
 
 ## How to Use
 

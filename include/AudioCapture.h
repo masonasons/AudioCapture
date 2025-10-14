@@ -122,6 +122,9 @@ public:
     // Check if the handler is valid (event created successfully)
     bool IsValid() const { return m_completionEvent != nullptr; }
 
+    // Get the activation result (HRESULT code from activation)
+    HRESULT GetActivationResult() const { return m_activationResult; }
+
 private:
     LONG m_refCount;
     HANDLE m_completionEvent;

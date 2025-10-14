@@ -251,6 +251,17 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         }
     }
 
+    // Check if Windows version supports process loopback (Build 19041+)
+    if (dwMajorVersion < 10 || (dwMajorVersion == 10 && dwBuild < 19041)) {
+        wchar_t msg[512];
+        swprintf_s(msg, L"Process capture requires Windows 10 Build 19041 or later.\n\n"
+                       L"Your system: Windows %lu Build %lu\n\n"
+                       L"Process capture will not be available. The application will fall back to system-wide audio capture.",
+                       dwMajorVersion, dwBuild);
+        MessageBox(nullptr, msg, L"Process Capture Not Supported", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
     // Use the virtual device for process loopback (not a physical device)
     LPCWSTR deviceId = VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK;
 
@@ -318,7 +329,41 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     asyncOp->Release();
 
     if (!success) {
+        // Get the activation result to show detailed error
+        HRESULT activationHr = handler->GetActivationResult();
         handler->Release();
+
+        // Show detailed error message to help user diagnose
+        wchar_t msg[1024];
+        const wchar_t* errorDesc = L"Unknown error";
+
+        // Common error codes and what they mean
+        if (activationHr == E_NOTIMPL || activationHr == 0x88890008) {  // AUDCLNT_E_UNSUPPORTED_FORMAT
+            errorDesc = L"Process loopback audio not supported by your audio driver.\n\n"
+                       L"This is usually caused by:\n"
+                       L"- Outdated or incompatible audio drivers\n"
+                       L"- Missing Windows updates\n"
+                       L"- Audio driver not fully supporting Windows 10 loopback features\n\n"
+                       L"Try updating your audio drivers and Windows.";
+        } else if (activationHr == E_ACCESSDENIED) {
+            errorDesc = L"Access denied to audio device.\n\n"
+                       L"Try running the application as administrator.";
+        } else if (activationHr == 0x887A0002) {  // DXGI_ERROR_NOT_FOUND
+            errorDesc = L"Audio device not found or not available.";
+        } else if (activationHr == 0x88890001) {  // AUDCLNT_E_NOT_INITIALIZED
+            errorDesc = L"Audio client could not be initialized.\n\n"
+                       L"The audio driver may not support this feature.";
+        }
+
+        swprintf_s(msg,
+            L"Process capture failed for this application.\n\n"
+            L"Windows Build: %lu (Requires 19041+)\n"
+            L"Error Code: 0x%08X\n\n"
+            L"%s\n\n"
+            L"The application will fall back to system-wide audio capture.",
+            dwBuild, activationHr, errorDesc);
+
+        MessageBox(nullptr, msg, L"Process Capture Failed", MB_OK | MB_ICONWARNING);
         return false;
     }
 
@@ -326,7 +371,16 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     m_audioClient = handler->GetAudioClient();
 
     if (!m_audioClient) {
+        HRESULT activationHr = handler->GetActivationResult();
         handler->Release();
+
+        wchar_t msg[512];
+        swprintf_s(msg,
+            L"Failed to get audio client for process capture.\n\n"
+            L"Error Code: 0x%08X\n\n"
+            L"The application will fall back to system-wide audio capture.",
+            activationHr);
+        MessageBox(nullptr, msg, L"Process Capture Failed", MB_OK | MB_ICONWARNING);
         return false;
     }
 
