@@ -7,6 +7,7 @@
 #include "OpusFileDestination.h"
 #include "FlacFileDestination.h"
 #include "DeviceOutputDestination.h"
+#include "DebugLogger.h"
 #include <algorithm>
 
 CaptureManager::CaptureManager()
@@ -538,6 +539,20 @@ void CaptureManager::ResumeFileDestinations() {
 
 void CaptureManager::OnAudioData(UINT32 sessionId, const std::wstring& sourceId,
                                  const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
+    // DEBUG: Track audio data flow to diagnose 0-byte files
+    static std::atomic<int> audioCallCount{0};
+    static std::atomic<uint64_t> totalBytesReceived{0};
+    int callNum = ++audioCallCount;
+    totalBytesReceived += size;
+
+    // Log every 100 calls to avoid spam
+    if (callNum == 1 || callNum % 100 == 0) {
+        wchar_t debugMsg[256];
+        swprintf_s(debugMsg, L"OnAudioData #%d: SessionID=%u, Size=%u bytes, Total=%.2f MB",
+                   callNum, sessionId, size, totalBytesReceived.load() / (1024.0 * 1024.0));
+        DebugLog(debugMsg);
+    }
+
     // CRITICAL OPTIMIZATION: Minimize mutex hold time to prevent callback blocking
     // We'll acquire mutex briefly just to validate session and copy necessary pointers,
     // then release it immediately before doing any expensive mixer operations

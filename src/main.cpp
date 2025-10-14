@@ -1541,30 +1541,16 @@ void StartCapture() {
         }
     }
     // Mode 2: Both Modes - mixed file + separate files per source
-    // Use Mode 0 approach for mixed files, Mode 1 approach for per-source files
+    // Solution: Create TWO sets of sessions with INDEPENDENT source instances:
+    // 1. Mixed session with all sources → creates mixed file
+    // 2. Per-source sessions with fresh source instances → creates per-source files
     else if (captureMode == 2) {
-        // First: Create mixed file session (like Mode 0)
-        std::vector<OutputDestinationPtr> mixedDestinations;
-
-        for (int formatIdx : checkedFileFormats) {
-            auto dest = CreateDestination(formatIdx, L"capture");
-            if (dest) {
-                mixedDestinations.push_back(dest);
-            }
-        }
-
-        // Add device destinations
-        auto deviceDests = CreateDeviceDestinations();
-        mixedDestinations.insert(mixedDestinations.end(), deviceDests.begin(), deviceDests.end());
-
-        // CRITICAL: Always create mixed session in Mode 2, even with no destinations
-        // This allows destinations to be added dynamically later
-        // Create fresh sources for mixed session
+        // First: Create mixed session with all sources for the mixed file
         std::vector<InputSourcePtr> mixedSources;
         for (int srcIdx : checkedSourceIndices) {
             InputSourcePtr source;
 
-            // CRITICAL FIX: Reuse tempSource for the first source to avoid duplicate initialization
+            // CRITICAL: Reuse tempSource for the first source to avoid duplicate initialization
             if (srcIdx == checkedSourceIndices[0] && tempSource) {
                 source = tempSource;
                 tempSource.reset(); // Mark as consumed
@@ -1582,16 +1568,33 @@ void StartCapture() {
             }
         }
 
-        if (!mixedSources.empty()) {
+        if (!mixedSources.empty() && !checkedFileFormats.empty()) {
+            // Create device destinations for monitoring
+            std::vector<OutputDestinationPtr> mixedDestinations;
+            auto deviceDests = CreateDeviceDestinations();
+            mixedDestinations.insert(mixedDestinations.end(), deviceDests.begin(), deviceDests.end());
+
             CaptureConfig config;
             config.sources = mixedSources;
-            config.destinations = mixedDestinations;  // Can be empty - destinations can be added later
-            // No routing rules = all sources naturally write to all destinations (mixed by destinations)
+            config.destinations = mixedDestinations;  // Device destinations only
+
+            // Enable mixed output to create the mixed file
+            config.enableMixedOutput = true;
+            config.mixedOutputPath = L"capture";
+
+            // Determine format from first checked format
+            int firstFormat = checkedFileFormats[0];
+            if (firstFormat == 0) config.mixedOutputFormat = AudioFormat::WAV;
+            else if (firstFormat == 1) config.mixedOutputFormat = AudioFormat::MP3;
+            else if (firstFormat == 2) config.mixedOutputFormat = AudioFormat::OPUS;
+            else if (firstFormat == 3) config.mixedOutputFormat = AudioFormat::FLAC;
+
+            config.mixedOutputBitrate = 192000;
 
             UINT32 sessionId = g_captureManager->StartCaptureSession(config);
             if (sessionId != 0) {
                 g_activeSessionIds.push_back(sessionId);
-                totalDestinations += static_cast<int>(mixedDestinations.size());
+                totalDestinations += static_cast<int>(mixedDestinations.size()) + 1;  // +1 for mixed file
 
                 // Track which sources are in this mixed session
                 std::vector<std::wstring> sourceIds;
@@ -1607,42 +1610,18 @@ void StartCapture() {
             }
         }
 
-        // Second: Create per-source sessions (like Mode 1)
+        // Second: Create per-source sessions with FRESH source instances for per-source files
         for (size_t i = 0; i < checkedSourceIndices.size(); i++) {
             int srcIdx = checkedSourceIndices[i];
             std::vector<OutputDestinationPtr> sourceDestinations;
 
-            // CRITICAL FIX: Reuse the source from the mixed session instead of creating a new one
-            // Windows process loopback doesn't allow the same process to be captured by multiple audio clients
-            // Creating a new source would call Initialize() again on the same process, which fails with E_UNEXPECTED
-            std::wstring sourceId = g_availableSources[srcIdx].metadata.id;
-            InputSourcePtr source;
+            // Create a FRESH source instance (do NOT reuse from mixed session!)
+            InputSourcePtr source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            if (!source) continue;
 
-            auto existingSource = g_activeSources.find(sourceId);
-            if (existingSource != g_activeSources.end()) {
-                // Reuse existing source from mixed session
-                source = existingSource->second;
-
-                // DEBUG: Log that we're reusing
-                std::wstring debugMsg = L"Mode 2: Reusing source " + sourceId + L" for per-source session";
-                OutputDebugStringW(debugMsg.c_str());
-                OutputDebugStringW(L"\n");
-            } else {
-                // This shouldn't happen in Mode 2, but handle it gracefully
-                std::wstring debugMsg = L"Mode 2: WARNING - Creating NEW source " + sourceId + L" (should have reused!)";
-                OutputDebugStringW(debugMsg.c_str());
-                OutputDebugStringW(L"\n");
-
-                source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
-                if (!source) continue;
-
-                // Apply volume setting
-                float volume = GetSourceVolume(source->GetMetadata().id);
-                source->SetVolume(volume);
-
-                // Store for real-time control
-                g_activeSources[source->GetMetadata().id] = source;
-            }
+            // Apply volume setting
+            float volume = GetSourceVolume(source->GetMetadata().id);
+            source->SetVolume(volume);
 
             // Get sanitized source name
             InputSourceMetadata metadata = source->GetMetadata();
@@ -1657,23 +1636,27 @@ void StartCapture() {
                 }
             }
 
-            // CRITICAL: Always create per-source session in Mode 2, even with no destinations
-            // This allows destinations to be added dynamically later
-            CaptureConfig config;
-            config.sources.push_back(source);
-            config.destinations = sourceDestinations;  // Can be empty
+            if (!sourceDestinations.empty()) {
+                CaptureConfig config;
+                config.sources.push_back(source);  // Only this fresh source
+                config.destinations = sourceDestinations;
 
-            UINT32 sessionId = g_captureManager->StartCaptureSession(config);
-            if (sessionId != 0) {
-                g_activeSessionIds.push_back(sessionId);
-                totalDestinations += static_cast<int>(sourceDestinations.size());
+                UINT32 sessionId = g_captureManager->StartCaptureSession(config);
+                if (sessionId != 0) {
+                    g_activeSessionIds.push_back(sessionId);
+                    totalDestinations += static_cast<int>(sourceDestinations.size());
 
-                // Track which source is in this per-source session
-                g_sessionToSources[sessionId] = { source->GetMetadata().id };
+                    // Track which source is in this per-source session
+                    g_sessionToSources[sessionId] = { source->GetMetadata().id };
 
-                // Store destinations for real-time control
-                for (const auto& dest : sourceDestinations) {
-                    g_activeDestinations[dest->GetName()] = dest;
+                    // Store destinations for real-time control
+                    for (const auto& dest : sourceDestinations) {
+                        g_activeDestinations[dest->GetName()] = dest;
+                    }
+
+                    // Store this fresh source (overwrites the mixed session source in g_activeSources)
+                    // This is OK because we're using separate source instances
+                    g_activeSources[source->GetMetadata().id] = source;
                 }
             }
         }

@@ -25,6 +25,7 @@ set(SOURCES
     src/CaptureManager.cpp
     src/AudioDeviceEnumerator.cpp
     src/AudioMixer.cpp
+    src/DebugLogger.cpp
     # InputSource architecture
     src/ProcessInputSource.cpp
     src/SystemAudioInputSource.cpp
@@ -51,6 +52,7 @@ set(HEADERS
     include/CaptureManager.h
     include/AudioDeviceEnumerator.h
     include/AudioMixer.h
+    include/DebugLogger.h
     # InputSource architecture
     include/InputSource.h
     include/ProcessInputSource.h
