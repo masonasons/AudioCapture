@@ -95,6 +95,17 @@ std::map<UINT32, std::vector<std::wstring>> g_sessionToSources;
 // This is needed for dynamically adding destinations during capture
 std::vector<BYTE> g_activeCaptureFormat;
 
+// CRITICAL: Track the last process ID that had a process-loopback audio client
+// Windows needs time to fully release the process loopback interface after Stop
+// If we try to re-initialize the same process too quickly, we get E_UNEXPECTED
+DWORD g_lastProcessLoopbackPid = 0;
+DWORD g_lastProcessLoopbackStopTime = 0;  // GetTickCount when stopped
+
+// WORKAROUND for Windows 10 Build 19044 bug: Cache audio format from first initialization
+// This allows us to skip creating tempSource on subsequent starts
+std::vector<BYTE> g_cachedFormatForPid;  // Cached format for last successful process
+DWORD g_cachedFormatPid = 0;  // PID this format belongs to
+
 // Window class name
 const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
 
@@ -1225,31 +1236,63 @@ void StartCapture() {
     // Get item count for output destinations list
     itemCount = ListView_GetItemCount(g_hOutputDestsList);
 
-    // Create first source temporarily to get format
-    auto tempSource = g_sourceManager->CreateSource(g_availableSources[checkedSourceIndices[0]]);
-    if (!tempSource || !tempSource->StartCapture()) {
-        MessageBox(g_hWnd, L"Failed to initialize audio source", L"Error", MB_OK | MB_ICONERROR);
-        return;
+    // Check if first source is a process and if we have cached format for it
+    DWORD firstSourcePid = 0;
+    bool useCachedFormat = false;
+    InputSourcePtr tempSource;  // Will be null if using cached format
+
+    if (g_availableSources[checkedSourceIndices[0]].metadata.type == InputSourceType::Process) {
+        firstSourcePid = g_availableSources[checkedSourceIndices[0]].metadata.processId;
+
+        // WORKAROUND: Check if we have cached format for this PID (Windows 10 Build 19044 bug)
+        if (firstSourcePid == g_cachedFormatPid && !g_cachedFormatForPid.empty()) {
+            useCachedFormat = true;
+        }
     }
 
-    // Get format from first source (now available after StartCapture)
-    const WAVEFORMATEX* format = tempSource->GetFormat();
-    if (!format) {
-        tempSource->StopCapture();
-        MessageBox(g_hWnd, L"Failed to get audio format", L"Error", MB_OK | MB_ICONERROR);
-        return;
+    std::vector<BYTE> formatBuffer;
+    const WAVEFORMATEX* formatCopy = nullptr;
+
+    if (useCachedFormat) {
+        // Use cached format - no need to create tempSource!
+        formatBuffer = g_cachedFormatForPid;
+        formatCopy = reinterpret_cast<const WAVEFORMATEX*>(formatBuffer.data());
+    } else {
+        // Create first source temporarily to get format
+        // CRITICAL: In Mode 2, this source will be reused to avoid duplicate process loopback initialization
+        tempSource = g_sourceManager->CreateSource(g_availableSources[checkedSourceIndices[0]]);
+        if (!tempSource || !tempSource->StartCapture()) {
+            MessageBox(g_hWnd, L"Failed to initialize audio source", L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        // Get format from first source (now available after StartCapture)
+        const WAVEFORMATEX* format = tempSource->GetFormat();
+        if (!format) {
+            tempSource->StopCapture();
+            MessageBox(g_hWnd, L"Failed to get audio format", L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        // Make a copy of the format structure (including extra bytes for WAVEFORMATEXTENSIBLE)
+        // so it remains valid after we destroy the temp source
+        UINT32 formatSize = sizeof(WAVEFORMATEX) + format->cbSize;
+        formatBuffer.resize(formatSize);
+        memcpy(formatBuffer.data(), format, formatSize);
+        formatCopy = reinterpret_cast<const WAVEFORMATEX*>(formatBuffer.data());
+
+        // Cache the format for this PID (Windows 10 Build 19044 workaround)
+        if (firstSourcePid != 0) {
+            g_cachedFormatForPid = formatBuffer;
+            g_cachedFormatPid = firstSourcePid;
+        }
+
+        // CRITICAL FIX: DON'T stop and reset tempSource yet!
+        // In Mode 2, we need to reuse it to avoid duplicate process initialization
+        // We'll stop it later if not reused
+        // tempSource->StopCapture();
+        // tempSource.reset();
     }
-
-    // Make a copy of the format structure (including extra bytes for WAVEFORMATEXTENSIBLE)
-    // so it remains valid after we destroy the temp source
-    UINT32 formatSize = sizeof(WAVEFORMATEX) + format->cbSize;
-    std::vector<BYTE> formatBuffer(formatSize);
-    memcpy(formatBuffer.data(), format, formatSize);
-    const WAVEFORMATEX* formatCopy = reinterpret_cast<const WAVEFORMATEX*>(formatBuffer.data());
-
-    // Stop it - we'll create fresh sources for actual capture
-    tempSource->StopCapture();
-    tempSource.reset();
 
     // Get bitrate and FLAC compression from controls
     int bitrate = GetBitrate() * 1000;  // Convert kbps to bps
@@ -1289,6 +1332,15 @@ void StartCapture() {
     }
 
     if (checkedFileFormats.empty() && checkedDevices.empty()) {
+        // CRITICAL FIX: Must clean up tempSource before returning!
+        if (tempSource) {
+            tempSource->StopCapture();
+            tempSource.reset();
+            // Give Windows extra time to release the process loopback audio interface
+            // Without this, the next Start attempt will fail with E_UNEXPECTED
+            Sleep(500);
+        }
+
         MessageBox(g_hWnd, L"Please select at least one output destination", L"Error", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -1376,7 +1428,16 @@ void StartCapture() {
             // Create fresh sources for this session
             std::vector<InputSourcePtr> sessionSources;
             for (int srcIdx : checkedSourceIndices) {
-                auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+                InputSourcePtr source;
+
+                // CRITICAL FIX: Reuse tempSource for the first source to avoid duplicate initialization
+                if (srcIdx == checkedSourceIndices[0] && tempSource) {
+                    source = tempSource;
+                    tempSource.reset(); // Mark as consumed
+                } else {
+                    source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+                }
+
                 if (source) {
                     // Apply volume setting
                     float volume = GetSourceVolume(source->GetMetadata().id);
@@ -1420,8 +1481,16 @@ void StartCapture() {
             int srcIdx = checkedSourceIndices[i];
             std::vector<OutputDestinationPtr> sourceDestinations;
 
-            // Create a fresh source for this session
-            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            InputSourcePtr source;
+
+            // CRITICAL FIX: Reuse tempSource for the first source to avoid duplicate initialization
+            if (srcIdx == checkedSourceIndices[0] && tempSource) {
+                source = tempSource;
+                tempSource.reset(); // Mark as consumed
+            } else {
+                source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            }
+
             if (!source) continue;
 
             // Apply volume setting
@@ -1493,7 +1562,16 @@ void StartCapture() {
         // Create fresh sources for mixed session
         std::vector<InputSourcePtr> mixedSources;
         for (int srcIdx : checkedSourceIndices) {
-            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            InputSourcePtr source;
+
+            // CRITICAL FIX: Reuse tempSource for the first source to avoid duplicate initialization
+            if (srcIdx == checkedSourceIndices[0] && tempSource) {
+                source = tempSource;
+                tempSource.reset(); // Mark as consumed
+            } else {
+                source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+            }
+
             if (source) {
                 // Apply volume setting
                 float volume = GetSourceVolume(source->GetMetadata().id);
@@ -1534,16 +1612,37 @@ void StartCapture() {
             int srcIdx = checkedSourceIndices[i];
             std::vector<OutputDestinationPtr> sourceDestinations;
 
-            // Create a fresh source for this session
-            auto source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
-            if (!source) continue;
+            // CRITICAL FIX: Reuse the source from the mixed session instead of creating a new one
+            // Windows process loopback doesn't allow the same process to be captured by multiple audio clients
+            // Creating a new source would call Initialize() again on the same process, which fails with E_UNEXPECTED
+            std::wstring sourceId = g_availableSources[srcIdx].metadata.id;
+            InputSourcePtr source;
 
-            // Apply volume setting
-            float volume = GetSourceVolume(source->GetMetadata().id);
-            source->SetVolume(volume);
+            auto existingSource = g_activeSources.find(sourceId);
+            if (existingSource != g_activeSources.end()) {
+                // Reuse existing source from mixed session
+                source = existingSource->second;
 
-            // Store for real-time control
-            g_activeSources[source->GetMetadata().id] = source;
+                // DEBUG: Log that we're reusing
+                std::wstring debugMsg = L"Mode 2: Reusing source " + sourceId + L" for per-source session";
+                OutputDebugStringW(debugMsg.c_str());
+                OutputDebugStringW(L"\n");
+            } else {
+                // This shouldn't happen in Mode 2, but handle it gracefully
+                std::wstring debugMsg = L"Mode 2: WARNING - Creating NEW source " + sourceId + L" (should have reused!)";
+                OutputDebugStringW(debugMsg.c_str());
+                OutputDebugStringW(L"\n");
+
+                source = g_sourceManager->CreateSource(g_availableSources[srcIdx]);
+                if (!source) continue;
+
+                // Apply volume setting
+                float volume = GetSourceVolume(source->GetMetadata().id);
+                source->SetVolume(volume);
+
+                // Store for real-time control
+                g_activeSources[source->GetMetadata().id] = source;
+            }
 
             // Get sanitized source name
             InputSourceMetadata metadata = source->GetMetadata();
@@ -1580,7 +1679,21 @@ void StartCapture() {
         }
     }
 
+    // Clean up tempSource if it wasn't consumed by any mode
+    if (tempSource) {
+        tempSource->StopCapture();
+        tempSource.reset();
+    }
+
     if (g_activeSessionIds.empty()) {
+        // CRITICAL FIX: Must clean up tempSource if no sessions were started
+        if (tempSource) {
+            tempSource->StopCapture();
+            tempSource.reset();
+            // Give Windows extra time to release the process loopback audio interface
+            Sleep(500);
+        }
+
         MessageBox(g_hWnd, L"Failed to start capture sessions", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
@@ -1613,6 +1726,19 @@ void StopCapture() {
         return;
     }
 
+    // CRITICAL FIX: Track if we're stopping a process-loopback capture
+    // We need to record the PID and timestamp so StartCapture can wait if needed
+    bool hadProcessLoopback = false;
+    DWORD processLoopbackPid = 0;
+    for (const auto& [sourceId, source] : g_activeSources) {
+        auto metadata = source->GetMetadata();
+        if (metadata.type == InputSourceType::Process && metadata.processId != 0) {
+            hadProcessLoopback = true;
+            processLoopbackPid = metadata.processId;
+            break;  // Only need to find one
+        }
+    }
+
     // Stop all active sessions
     for (UINT32 sessionId : g_activeSessionIds) {
         if (sessionId != 0) {
@@ -1623,6 +1749,18 @@ void StopCapture() {
     g_activeSources.clear();  // Clear active source tracking
     g_activeDestinations.clear();  // Clear active destination tracking
     g_sessionToSources.clear();  // Clear session-to-source mapping
+
+    // CRITICAL FIX: Give Windows time to fully release process loopback audio resources
+    // Without this delay, immediately clicking Start again will fail because Windows
+    // hasn't finished releasing the IAudioClient from the previous session
+    // Windows 10 Build 19044 needs more time than newer builds
+    Sleep(500);
+
+    // Record when we stopped this process loopback capture
+    if (hadProcessLoopback) {
+        g_lastProcessLoopbackPid = processLoopbackPid;
+        g_lastProcessLoopbackStopTime = GetTickCount();
+    }
 
     // Clear stored capture mode and settings
     g_activeCaptureMode = -1;

@@ -11,6 +11,11 @@
 #include <algorithm>
 #include <mutex>
 
+// Define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK if not already defined by SDK
+#ifndef VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
+#define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
+#endif
+
 // CRITICAL FIX: Global mutex to serialize WASAPI Initialize/Start operations
 // Multiple sources calling IAudioClient::Initialize() simultaneously causes audio glitches
 // This mutex ensures WASAPI operations happen one at a time to avoid driver conflicts
@@ -458,6 +463,34 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         nullptr);
 
     if (FAILED(hr)) {
+
+        // Show detailed error message for E_UNEXPECTED on older Windows 10 builds
+        // Build 19044 has a severe bug where process loopback is never released
+        if (hr == E_UNEXPECTED && dwBuild <= 19044) {
+            // Only show this message once per session to avoid spam
+            static bool shownBugMessage = false;
+            if (!shownBugMessage) {
+                shownBugMessage = true;
+                wchar_t msg[1536];
+                swprintf_s(msg,
+                    L"WINDOWS 10 BUILD %lu BUG DETECTED\n\n"
+                    L"Process audio capture has failed because Windows 10 Build 19044 has a\n"
+                    L"severe bug where process loopback audio interfaces are permanently locked\n"
+                    L"after first use and cannot be reused.\n\n"
+                    L"WORKAROUNDS:\n"
+                    L"1. RESTART AudioCapture - Close and reopen this application\n"
+                    L"2. RESTART target process - Close and reopen the app being captured (PID %lu)\n"
+                    L"3. DON'T STOP - Once started, let capture run continuously\n"
+                    L"4. UPGRADE WINDOWS - Update to Windows 11 or newer Windows 10 builds\n\n"
+                    L"The application will now fall back to SYSTEM-WIDE audio capture,\n"
+                    L"which captures ALL system audio, not just the target process.\n\n"
+                    L"This is a known Microsoft bug in older Windows 10 builds and\n"
+                    L"cannot be fixed in AudioCapture.",
+                    dwBuild, processId);
+                MessageBox(nullptr, msg, L"Critical Windows Bug - Process Audio Locked", MB_OK | MB_ICONERROR);
+            }
+        }
+
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -619,6 +652,7 @@ bool AudioCapture::Start() {
 
         // Start audio client
         HRESULT hr = m_audioClient->Start();
+
         if (FAILED(hr)) {
             return false;
         }

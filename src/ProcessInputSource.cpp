@@ -102,7 +102,7 @@ bool ProcessInputSource::StartCapture() {
 
     // Check if already capturing
     if (m_audioCapture->IsCapturing()) {
-        return false; // Already capturing
+        return true; // Already capturing - this is OK, return success
     }
 
     // Start the AudioCapture
