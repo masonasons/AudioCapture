@@ -51,6 +51,8 @@ HWND g_hOutputPath;
 HWND g_hBrowseBtn;
 HWND g_hRefreshBtn;
 HWND g_hStartStopBtn;
+HWND g_hSkipSilenceCheck;      // Skip silence checkbox
+HWND g_hPauseResumeBtn;        // Pause/Resume button (only visible during file recording)
 HWND g_hStatusText;
 HACCEL g_hAccel;               // Accelerator table
 
@@ -66,6 +68,7 @@ std::vector<AudioDeviceInfo> g_availableOutputDevices;
 std::vector<UINT32> g_activeSessionIds;  // Multiple sessions for multi-file mode
 bool g_isCapturing = false;
 bool g_useWinRT = false;
+bool g_isFilesPaused = false;  // Track pause state for file destinations
 
 // Volume settings per source (key = source ID, value = volume 0.0-1.0)
 std::map<std::wstring, float> g_sourceVolumes;
@@ -288,6 +291,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (LOWORD(wParam) == IDC_BROWSE_BTN) {
             BrowseOutputFolder();
         }
+        else if (LOWORD(wParam) == IDC_PAUSE_RESUME_BTN) {
+            // Toggle pause/resume state for file destinations
+            if (g_isFilesPaused) {
+                g_captureManager->ResumeFileDestinations();
+                SetWindowText(g_hPauseResumeBtn, L"&Pause");
+                g_isFilesPaused = false;
+                UpdateStatus(L"File recording resumed");
+            } else {
+                g_captureManager->PauseFileDestinations();
+                SetWindowText(g_hPauseResumeBtn, L"&Resume");
+                g_isFilesPaused = true;
+                UpdateStatus(L"File recording paused (device monitoring continues)");
+            }
+        }
         else if (LOWORD(wParam) == IDC_INPUT_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
             // Filter combo box selection changed - refresh the input sources list
             RefreshInputSources();
@@ -344,6 +361,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                                     OutputDestinationPtr dest;
                                     DestinationConfig config;
                                     config.useTimestamp = true;
+
+                                    // Get skip silence setting from checkbox
+                                    config.skipSilence = (SendMessage(g_hSkipSilenceCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                                    config.silenceThreshold = 0.01f;  // 1% amplitude threshold
+                                    config.silenceDurationMs = 1000;  // Skip after 1 second of silence
 
                                     // Create destination based on type and index from lParam
                                     if (destType == 0) {  // File format
@@ -896,12 +918,22 @@ void InitializeControls(HWND hwnd) {
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         970, 545, 60, 25, hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr);
 
+    // Skip silence checkbox - positioned above output path
+    g_hSkipSilenceCheck = CreateWindow(L"BUTTON", L"Skip &Silence (files only)",
+        WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+        560, 543, 160, 20, hwnd, (HMENU)IDC_SKIP_SILENCE_CHECK, g_hInst, nullptr);
+
     // Refresh button - TAB ORDER 5
     g_hRefreshBtn = CreateWindow(L"BUTTON", L"&Refresh",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
         10, 580, 80, 30, hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr);
 
-    // Start/Stop button - TAB ORDER 6
+    // Pause/Resume button - TAB ORDER 6 (initially hidden, shown only during file recording)
+    g_hPauseResumeBtn = CreateWindow(L"BUTTON", L"&Pause",
+        WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,  // Not WS_VISIBLE initially
+        100, 580, 80, 30, hwnd, (HMENU)IDC_PAUSE_RESUME_BTN, g_hInst, nullptr);
+
+    // Start/Stop button - TAB ORDER 7
     g_hStartStopBtn = CreateWindow(L"BUTTON", L"&Start",
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
         1040, 545, 50, 25, hwnd, (HMENU)IDC_START_STOP_BTN, g_hInst, nullptr);
@@ -1271,6 +1303,11 @@ void StartCapture() {
         DestinationConfig config;
         config.useTimestamp = true;
 
+        // Get skip silence setting from checkbox
+        config.skipSilence = (SendMessage(g_hSkipSilenceCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        config.silenceThreshold = 0.01f;  // 1% amplitude threshold
+        config.silenceDurationMs = 1000;  // Skip after 1 second of silence
+
         if (formatIndex == 0) {  // WAV
             config.outputPath = outputPath + L"\\" + baseFilename + L".wav";
             dest = std::make_shared<WavFileDestination>();
@@ -1557,6 +1594,14 @@ void StartCapture() {
     ShowWindow(g_hRadioMultipleFiles, SW_HIDE);
     ShowWindow(g_hRadioBothModes, SW_HIDE);
 
+    // Show pause/resume button only if there are file destinations
+    if (!checkedFileFormats.empty()) {
+        ShowWindow(g_hPauseResumeBtn, SW_SHOW);
+        SetWindowText(g_hPauseResumeBtn, L"&Pause");
+    } else {
+        ShowWindow(g_hPauseResumeBtn, SW_HIDE);
+    }
+
     UpdateStatus(L"Capturing " + std::to_wstring(checkedSourceIndices.size()) + L" source(s) to " +
                  std::to_wstring(totalDestinations) + L" destination(s) [" +
                  std::to_wstring(g_activeSessionIds.size()) + L" sessions]");
@@ -1590,6 +1635,11 @@ void StopCapture() {
 
     g_isCapturing = false;
     SetWindowText(g_hStartStopBtn, L"Start");
+
+    // Hide pause/resume button when capture stops and reset state
+    ShowWindow(g_hPauseResumeBtn, SW_HIDE);
+    SetWindowText(g_hPauseResumeBtn, L"&Pause");  // Reset text
+    g_isFilesPaused = false;  // Reset pause state
 
     // Show capture mode controls again after capture stops
     ShowWindow(g_hCaptureModeGroup, SW_SHOW);

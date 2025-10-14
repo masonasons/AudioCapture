@@ -27,6 +27,10 @@
 #define IDC_INPUT_FILTER_COMBO  1015
 #define IDC_OUTPUT_FILTER_COMBO 1016
 
+// Skip silence and pause/resume controls
+#define IDC_SKIP_SILENCE_CHECK  1017
+#define IDC_PAUSE_RESUME_BTN    1018
+
 // Menu IDs
 #define IDM_EXIT                2001
 #define IDM_ABOUT               2002

@@ -180,6 +180,14 @@ protected:
      */
     void StopAsyncWriter();
 
+    // Silence detection state (protected so derived classes can initialize)
+    bool m_skipSilence;
+    float m_silenceThreshold;
+    UINT32 m_silenceDurationMs;
+    UINT32 m_silenceDurationSamples;  // Converted from Ms based on format
+    UINT32 m_consecutiveSilentSamples;
+    WAVEFORMATEX* m_format;  // Stored for silence detection calculations
+
 private:
     // Async write queue infrastructure
     struct AudioChunk {
@@ -196,14 +204,6 @@ private:
 
     // Writer thread function
     void WriterThreadFunc();
-
-    // Silence detection state
-    bool m_skipSilence;
-    float m_silenceThreshold;
-    UINT32 m_silenceDurationMs;
-    UINT32 m_silenceDurationSamples;  // Converted from Ms based on format
-    UINT32 m_consecutiveSilentSamples;
-    WAVEFORMATEX* m_format;  // Stored for silence detection calculations
 
     /**
      * @brief Detect if an audio buffer contains silence
