@@ -7,7 +7,6 @@
 #include "OpusFileDestination.h"
 #include "FlacFileDestination.h"
 #include "DeviceOutputDestination.h"
-#include "DebugLogger.h"
 #include <algorithm>
 
 CaptureManager::CaptureManager()
@@ -51,13 +50,18 @@ UINT32 CaptureManager::StartCaptureSession(const CaptureConfig& config) {
         std::wstring sourceId = metadata.id;
 
         // Start capturing from this source FIRST (needed to get format)
-        if (!source->StartCapture()) {
-            // Failed to start capture from this source
-            // Clean up and return failure
-            for (auto& src : session->sources) {
-                src->StopCapture();
+        // NOTE: Source might already be started (e.g., tempSource in Mode 2)
+        // Only start if not already capturing
+        bool alreadyStarted = (source->GetFormat() != nullptr);
+        if (!alreadyStarted) {
+            if (!source->StartCapture()) {
+                // Failed to start capture from this source
+                // Clean up and return failure
+                for (auto& src : session->sources) {
+                    src->StopCapture();
+                }
+                return 0;
             }
-            return 0;
         }
 
         // Cache format pointer to avoid mutex + linear search in audio callbacks
@@ -106,6 +110,7 @@ UINT32 CaptureManager::StartCaptureSession(const CaptureConfig& config) {
                 DestinationConfig destConfig;
                 destConfig.outputPath = config.mixedOutputPath;
                 destConfig.bitrate = config.mixedOutputBitrate;
+                destConfig.useTimestamp = true;  // Add timestamp like per-source files
 
                 switch (config.mixedOutputFormat) {
                 case AudioFormat::WAV: {
@@ -539,20 +544,6 @@ void CaptureManager::ResumeFileDestinations() {
 
 void CaptureManager::OnAudioData(UINT32 sessionId, const std::wstring& sourceId,
                                  const BYTE* data, UINT32 size, const WAVEFORMATEX* format) {
-    // DEBUG: Track audio data flow to diagnose 0-byte files
-    static std::atomic<int> audioCallCount{0};
-    static std::atomic<uint64_t> totalBytesReceived{0};
-    int callNum = ++audioCallCount;
-    totalBytesReceived += size;
-
-    // Log every 100 calls to avoid spam
-    if (callNum == 1 || callNum % 100 == 0) {
-        wchar_t debugMsg[256];
-        swprintf_s(debugMsg, L"OnAudioData #%d: SessionID=%u, Size=%u bytes, Total=%.2f MB",
-                   callNum, sessionId, size, totalBytesReceived.load() / (1024.0 * 1024.0));
-        DebugLog(debugMsg);
-    }
-
     // CRITICAL OPTIMIZATION: Minimize mutex hold time to prevent callback blocking
     // We'll acquire mutex briefly just to validate session and copy necessary pointers,
     // then release it immediately before doing any expensive mixer operations
@@ -633,6 +624,12 @@ void CaptureManager::OnAudioData(UINT32 sessionId, const std::wstring& sourceId,
                     }
                 }
             }
+        }
+
+        // CRITICAL: If routing rules exist, route the UNMIXED source data to per-source destinations
+        // This allows Mode 2 to have BOTH mixed output AND per-source files
+        if (hasRoutingRules) {
+            RouteAudioData(sessionPtr, sourceId, data, size, format);
         }
     } else {
         // No mixer needed (single source or routing rules in use)

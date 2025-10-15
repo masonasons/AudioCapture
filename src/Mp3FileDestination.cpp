@@ -1,5 +1,4 @@
 #include "Mp3FileDestination.h"
-#include "DebugLogger.h"
 
 Mp3FileDestination::Mp3FileDestination()
     : m_encoder(std::make_unique<Mp3Encoder>())
@@ -93,21 +92,7 @@ bool Mp3FileDestination::Configure(const WAVEFORMATEX* format, const Destination
 }
 
 bool Mp3FileDestination::WriteAudioDataInternal(const BYTE* data, UINT32 size) {
-    // DEBUG: Track writes to diagnose 0-byte files
-    static std::atomic<int> writeCount{0};
-    static std::atomic<uint64_t> totalWritten{0};
-    int writeNum = ++writeCount;
-    totalWritten += size;
-
-    if (writeNum == 1 || writeNum % 100 == 0) {
-        wchar_t debugMsg[512];
-        swprintf_s(debugMsg, L"[MP3] Write #%d: %u bytes, Total=%.2f MB, File=%s",
-                   writeNum, size, totalWritten.load() / (1024.0 * 1024.0), m_filePath.c_str());
-        DebugLog(debugMsg);
-    }
-
     if (!IsOpen()) {
-        DebugLog(L"[MP3] ERROR: WriteAudioDataInternal called but encoder is NOT OPEN!");
         SetError(L"Cannot write - MP3 encoder is not open");
         return false;
     }
@@ -118,7 +103,6 @@ bool Mp3FileDestination::WriteAudioDataInternal(const BYTE* data, UINT32 size) {
     }
 
     if (!m_encoder->WriteData(data, size)) {
-        DebugLog(L"[MP3] ERROR: m_encoder->WriteData() FAILED!");
         SetError(L"Failed to encode data to MP3 file");
         return false;
     }
@@ -127,23 +111,14 @@ bool Mp3FileDestination::WriteAudioDataInternal(const BYTE* data, UINT32 size) {
 }
 
 void Mp3FileDestination::Close() {
-    // DEBUG: Log when closing
-    if (!m_filePath.empty()) {
-        wchar_t debugMsg[512];
-        swprintf_s(debugMsg, L"[MP3] Closing file: %s", m_filePath.c_str());
-        DebugLog(debugMsg);
-    }
-
     // Stop the async writer thread (flushes pending writes)
     StopAsyncWriter();
 
     if (m_encoder) {
         m_encoder->Close();
-        DebugLog(L"[MP3] Encoder closed successfully");
     }
 
     m_filePath.clear();
-    DebugLog(L"[MP3] Close() completed");
 }
 
 bool Mp3FileDestination::IsOpen() const {
