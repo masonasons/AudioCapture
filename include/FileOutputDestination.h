@@ -5,6 +5,7 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <filesystem>
 
 /**
  * @brief Base class for file-based output destinations
@@ -30,6 +31,40 @@ public:
     }
 
 protected:
+    /**
+     * @brief Ensure directory exists for the given file path
+     *
+     * Creates all necessary parent directories if they don't exist.
+     *
+     * @param filePath Full file path
+     * @return true if directory exists or was created successfully, false on error
+     */
+    bool EnsureDirectoryExists(const std::wstring& filePath) {
+        try {
+            std::filesystem::path path(filePath);
+            std::filesystem::path directory = path.parent_path();
+
+            // If no directory component (file in current dir), nothing to create
+            if (directory.empty()) {
+                return true;
+            }
+
+            // Check if directory exists
+            if (std::filesystem::exists(directory)) {
+                return true;
+            }
+
+            // Create all parent directories
+            return std::filesystem::create_directories(directory);
+        }
+        catch (const std::filesystem::filesystem_error& e) {
+            // Convert error message to wstring
+            std::string errMsg = e.what();
+            SetError(L"Failed to create directory: " + std::wstring(errMsg.begin(), errMsg.end()));
+            return false;
+        }
+    }
+
     /**
      * @brief Generate output file path with optional timestamp
      *

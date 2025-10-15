@@ -31,6 +31,11 @@ bool WavFileDestination::Configure(const WAVEFORMATEX* format, const Destination
     // Generate file path with optional timestamp
     m_filePath = GenerateFilePath(config.outputPath, config.useTimestamp);
 
+    // Ensure directory exists
+    if (!EnsureDirectoryExists(m_filePath)) {
+        return false;  // Error already set by EnsureDirectoryExists
+    }
+
     // Open the WAV file
     if (!m_writer->Open(m_filePath, format)) {
         SetError(L"Failed to open WAV file: " + m_filePath);

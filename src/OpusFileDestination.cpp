@@ -69,6 +69,11 @@ bool OpusFileDestination::Configure(const WAVEFORMATEX* format, const Destinatio
     // Generate file path with optional timestamp
     m_filePath = GenerateFilePath(config.outputPath, config.useTimestamp);
 
+    // Ensure directory exists
+    if (!EnsureDirectoryExists(m_filePath)) {
+        return false;  // Error already set by EnsureDirectoryExists
+    }
+
     // Ensure file has .opus extension (Opus in OGG container)
     if (m_filePath.length() < 5 ||
         m_filePath.substr(m_filePath.length() - 5) != L".opus") {

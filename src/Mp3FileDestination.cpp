@@ -70,6 +70,11 @@ bool Mp3FileDestination::Configure(const WAVEFORMATEX* format, const Destination
     // Generate file path with optional timestamp
     m_filePath = GenerateFilePath(config.outputPath, config.useTimestamp);
 
+    // Ensure directory exists
+    if (!EnsureDirectoryExists(m_filePath)) {
+        return false;  // Error already set by EnsureDirectoryExists
+    }
+
     // Ensure file has .mp3 extension
     if (m_filePath.length() < 4 ||
         m_filePath.substr(m_filePath.length() - 4) != L".mp3") {
