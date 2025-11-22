@@ -118,6 +118,8 @@ void CheckProcessesByNames(const std::vector<std::wstring>& names);
 void SavePreset();
 void LoadPreset();
 void DeletePreset();
+LRESULT CALLBACK PresetNameDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
+bool IsValidPresetName(const std::wstring& name);
 
 // Helper to detect Windows version
 bool IsWindows8OrGreater() {
@@ -2264,42 +2266,164 @@ void ApplySettingsFromJson(const json& preset) {
     }
 }
 
+// Validation function for preset names
+bool IsValidPresetName(const std::wstring& name) {
+    if (name.empty() || name.length() > 100) {
+        return false;
+    }
+
+    // Check for invalid filename characters
+    const wchar_t* invalidChars = L"\\/:*?\"<>|";
+    for (wchar_t c : name) {
+        if (wcschr(invalidChars, c) != nullptr) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Dialog procedure for preset name input
+LRESULT CALLBACK PresetNameDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    static wchar_t* pPresetName = nullptr;
+    static HWND hEdit = nullptr;
+
+    switch (uMsg) {
+    case WM_CREATE: {
+        CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
+        pPresetName = (wchar_t*)pCreate->lpCreateParams;
+
+        // Create controls
+        CreateWindow(L"STATIC", L"Preset Name:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            10, 10, 100, 20,
+            hwndDlg, nullptr, g_hInst, nullptr);
+
+        hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
+            10, 35, 290, 22,
+            hwndDlg, (HMENU)100, g_hInst, nullptr);
+
+        CreateWindow(L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            100, 70, 80, 25,
+            hwndDlg, (HMENU)IDOK, g_hInst, nullptr);
+
+        CreateWindow(L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            190, 70, 80, 25,
+            hwndDlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+
+        SetFocus(hEdit);
+        return 0;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDOK: {
+            GetWindowText(hEdit, pPresetName, 256);
+
+            // Validate the name
+            if (!IsValidPresetName(pPresetName)) {
+                MessageBox(hwndDlg,
+                    L"Invalid preset name.\n\nPreset names cannot:\n- Be empty\n- Contain: \\ / : * ? \" < > |\n- Be longer than 100 characters",
+                    L"Invalid Name", MB_OK | MB_ICONWARNING);
+                SetFocus(hEdit);
+                return 0;
+            }
+
+            // Signal successful completion
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, 1);
+            DestroyWindow(hwndDlg);
+            return 0;
+        }
+
+        case IDCANCEL:
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, 0);
+            DestroyWindow(hwndDlg);
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        SetWindowLongPtr(hwndDlg, GWLP_USERDATA, 0);
+        DestroyWindow(hwndDlg);
+        return 0;
+    }
+
+    return DefWindowProc(hwndDlg, uMsg, wParam, lParam);
+}
+
 void SavePreset() {
-    // Prompt for preset name
     wchar_t presetName[256] = L"";
 
-    // Create a simple input dialog using InputBox pattern
+    // Register dialog window class (if not already registered)
+    static bool classRegistered = false;
+    const wchar_t* dialogClassName = L"PresetNameDialog";
+
+    if (!classRegistered) {
+        WNDCLASS wc = {};
+        wc.lpfnWndProc = PresetNameDialogProc;
+        wc.hInstance = g_hInst;
+        wc.lpszClassName = dialogClassName;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+
+        if (RegisterClass(&wc)) {
+            classRegistered = true;
+        } else {
+            MessageBox(g_hWnd, L"Failed to register dialog class.", L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+
+    // Create the dialog window
     HWND hDlg = CreateWindowEx(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
-        L"STATIC",
+        dialogClassName,
         L"Save Preset",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        (GetSystemMetrics(SM_CXSCREEN) - 300) / 2,
-        (GetSystemMetrics(SM_CYSCREEN) - 150) / 2,
-        300, 150,
+        (GetSystemMetrics(SM_CXSCREEN) - 320) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - 130) / 2,
+        320, 130,
         g_hWnd,
         nullptr,
         g_hInst,
-        nullptr
+        presetName  // Pass preset name buffer as creation parameter
     );
 
     if (!hDlg) {
-        // Fallback: Use a simple message box to get name (not ideal but works)
-        // For now, use a default name with timestamp
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        swprintf_s(presetName, L"Preset_%04d%02d%02d_%02d%02d%02d",
-            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    } else {
-        DestroyWindow(hDlg);
-        // For simplicity, use timestamp-based name
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        swprintf_s(presetName, L"Preset_%04d%02d%02d_%02d%02d%02d",
-            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        MessageBox(g_hWnd, L"Failed to create dialog.", L"Error", MB_OK | MB_ICONERROR);
+        return;
     }
 
-    // Validate preset name
+    // Disable parent window
+    EnableWindow(g_hWnd, FALSE);
+
+    // Message loop for the dialog
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        // Check if dialog still exists
+        if (!IsWindow(hDlg)) {
+            break;
+        }
+
+        if (!IsDialogMessage(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        // Check if dialog was closed
+        if (!IsWindow(hDlg)) {
+            break;
+        }
+    }
+
+    // Re-enable parent window
+    EnableWindow(g_hWnd, TRUE);
+    SetForegroundWindow(g_hWnd);
+
+    // If user cancelled or preset name is empty, return
     if (wcslen(presetName) == 0) {
         return;
     }
@@ -2326,8 +2450,8 @@ void SavePreset() {
             SendMessage(g_hPresetCombo, CB_SETCURSEL, index, 0);
         }
 
-        std::wstring msg = L"Preset saved as: " + std::wstring(presetName);
-        SetWindowText(g_hStatusText, msg.c_str());
+        std::wstring statusMsg = L"Preset saved as: " + std::wstring(presetName);
+        SetWindowText(g_hStatusText, statusMsg.c_str());
     } else {
         MessageBox(g_hWnd, L"Failed to save preset.", L"Error", MB_OK | MB_ICONERROR);
     }
