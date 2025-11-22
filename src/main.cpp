@@ -58,6 +58,11 @@ HWND g_hProcessVolumeSlider;
 HWND g_hProcessVolumeLabel;
 HWND g_hMicrophoneVolumeSlider;
 HWND g_hMicrophoneVolumeLabel;
+HWND g_hPresetLabel;
+HWND g_hPresetCombo;
+HWND g_hSavePresetBtn;
+HWND g_hLoadPresetBtn;
+HWND g_hDeletePresetBtn;
 
 // Volume settings (0-100%)
 float g_processVolume = 100.0f;  // Default to 100%
@@ -103,6 +108,16 @@ void RemoveTrayIcon();
 void ShowTrayContextMenu();
 void ShowWindowFromTray();
 void HideWindowToTray();
+std::wstring GetPresetsDirectory();
+std::vector<std::wstring> GetAvailablePresets();
+void PopulatePresetCombo();
+json GetCurrentSettingsAsJson();
+void ApplySettingsFromJson(const json& preset);
+std::vector<std::wstring> GetCheckedProcessNames();
+void CheckProcessesByNames(const std::vector<std::wstring>& names);
+void SavePreset();
+void LoadPreset();
+void DeletePreset();
 
 // Helper to detect Windows version
 bool IsWindows8OrGreater() {
@@ -246,6 +261,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE:
         InitializeControls(hwnd);
         LoadSettings();
+        PopulatePresetCombo();  // Load available presets
         RefreshProcessList();
         // Set initial focus based on OS support
         if (g_supportsProcessCapture) {
@@ -357,6 +373,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_SAVE_PRESET_BTN:
+            SavePreset();
+            break;
+
+        case IDC_LOAD_PRESET_BTN:
+            LoadPreset();
+            break;
+
+        case IDC_DELETE_PRESET_BTN:
+            DeletePreset();
+            break;
+
         case IDM_TRAY_SHOW:
             ShowWindowFromTray();
             break;
@@ -397,14 +425,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int width = rcClient.right - rcClient.left;
         int height = rcClient.bottom - rcClient.top;
 
+        // Position preset controls (always at top)
+        SetWindowPos(g_hPresetLabel, nullptr, 10, 10, 50, 20, SWP_NOZORDER);
+        SetWindowPos(g_hPresetCombo, nullptr, 60, 7, 200, 200, SWP_NOZORDER);
+        SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 60, 25, SWP_NOZORDER);
+        SetWindowPos(g_hLoadPresetBtn, nullptr, 335, 7, 60, 25, SWP_NOZORDER);
+        SetWindowPos(g_hDeletePresetBtn, nullptr, 400, 7, 60, 25, SWP_NOZORDER);
+
         // Adjust control positions and sizes based on whether process list is visible
-        int topOffset = g_supportsProcessCapture ? 245 : 10;
+        // Added 30 pixels to account for preset controls
+        int topOffset = g_supportsProcessCapture ? 275 : 40;
 
         if (g_supportsProcessCapture) {
-            SetWindowPos(g_hProcessListLabel, nullptr, 10, 10, 200, 20, SWP_NOZORDER);
-            SetWindowPos(g_hProcessList, nullptr, 10, 30, width - 20, 180, SWP_NOZORDER);
-            SetWindowPos(g_hRefreshBtn, nullptr, 10, 215, 100, 25, SWP_NOZORDER);
-            SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 218, 280, 20, SWP_NOZORDER);
+            SetWindowPos(g_hProcessListLabel, nullptr, 10, 40, 200, 20, SWP_NOZORDER);
+            SetWindowPos(g_hProcessList, nullptr, 10, 60, width - 20, 180, SWP_NOZORDER);
+            SetWindowPos(g_hRefreshBtn, nullptr, 10, 245, 100, 25, SWP_NOZORDER);
+            SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 248, 280, 20, SWP_NOZORDER);
         } else {
             // Show format label when process list is hidden
             SetWindowPos(g_hFormatLabel, nullptr, 10, topOffset - 20, 60, 20, SWP_NOZORDER);
@@ -472,21 +508,62 @@ void InitializeControls(HWND hwnd) {
     // Determine visibility based on OS support
     DWORD processListVisibility = g_supportsProcessCapture ? (WS_CHILD | WS_VISIBLE) : WS_CHILD;
 
-    // Process list label
+    // ========== Preset Controls (always visible) ==========
+    // Preset label
+    g_hPresetLabel = CreateWindow(
+        L"STATIC", L"Preset:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        10, 10, 50, 20,
+        hwnd, (HMENU)IDC_PRESET_LABEL, g_hInst, nullptr
+    );
+
+    // Preset combo box
+    g_hPresetCombo = CreateWindow(
+        WC_COMBOBOX, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        60, 7, 200, 200,
+        hwnd, (HMENU)IDC_PRESET_COMBO, g_hInst, nullptr
+    );
+
+    // Save preset button
+    g_hSavePresetBtn = CreateWindow(
+        L"BUTTON", L"Save",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        270, 7, 60, 25,
+        hwnd, (HMENU)IDC_SAVE_PRESET_BTN, g_hInst, nullptr
+    );
+
+    // Load preset button
+    g_hLoadPresetBtn = CreateWindow(
+        L"BUTTON", L"Load",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        335, 7, 60, 25,
+        hwnd, (HMENU)IDC_LOAD_PRESET_BTN, g_hInst, nullptr
+    );
+
+    // Delete preset button
+    g_hDeletePresetBtn = CreateWindow(
+        L"BUTTON", L"Delete",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        400, 7, 60, 25,
+        hwnd, (HMENU)IDC_DELETE_PRESET_BTN, g_hInst, nullptr
+    );
+
+    // Process list label (moved down to make room for presets)
     g_hProcessListLabel = CreateWindow(
         L"STATIC", L"Available Processes:",
         processListVisibility | SS_LEFT,
-        10, 10, 200, 20,
+        10, 40, 200, 20,
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
     );
 
-    // Process list (ListView) - with checkboxes for multi-select
+    // Process list (ListView) - with checkboxes for multi-select (moved down for presets)
     g_hProcessList = CreateWindowEx(
         WS_EX_CLIENTEDGE,
         WC_LISTVIEW,
         L"",
         processListVisibility | WS_TABSTOP | LVS_REPORT,
-        10, 30, 760, 180,
+        10, 60, 760, 180,
         hwnd,
         (HMENU)IDC_PROCESS_LIST,
         g_hInst,
@@ -515,19 +592,19 @@ void InitializeControls(HWND hwnd) {
     lvc.pszText = (LPWSTR)L"Path";
     ListView_InsertColumn(g_hProcessList, 3, &lvc);
 
-    // Refresh button
+    // Refresh button (adjusted position for preset controls)
     g_hRefreshBtn = CreateWindow(
         L"BUTTON", L"Refresh",
         processListVisibility | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 215, 100, 25,
+        10, 245, 100, 25,
         hwnd, (HMENU)IDC_REFRESH_BTN, g_hInst, nullptr
     );
 
-    // Show audio only checkbox
+    // Show audio only checkbox (adjusted position for preset controls)
     g_hShowAudioOnlyCheckbox = CreateWindow(
         L"BUTTON", L"Show only processes with active audio",
         processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
-        120, 218, 280, 20,
+        120, 248, 280, 20,
         hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
     );
 
@@ -1929,4 +2006,398 @@ void HideWindowToTray() {
 
     // Add tray icon
     AddTrayIcon();
+}
+
+// ============================================================================
+// Preset Management Functions
+// ============================================================================
+
+std::wstring GetPresetsDirectory() {
+    wchar_t path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPath(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
+        std::wstring presetsDir = path;
+        presetsDir += L"\\AudioCapture\\presets";
+        CreateDirectory((std::wstring(path) + L"\\AudioCapture").c_str(), nullptr);
+        CreateDirectory(presetsDir.c_str(), nullptr);
+        return presetsDir;
+    }
+    return L"presets";
+}
+
+std::vector<std::wstring> GetAvailablePresets() {
+    std::vector<std::wstring> presets;
+    std::wstring presetsDir = GetPresetsDirectory();
+    std::wstring searchPath = presetsDir + L"\\*.json";
+
+    WIN32_FIND_DATA findData;
+    HANDLE hFind = FindFirstFile(searchPath.c_str(), &findData);
+
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                std::wstring filename = findData.cFileName;
+                // Remove .json extension
+                size_t ext = filename.rfind(L".json");
+                if (ext != std::wstring::npos) {
+                    presets.push_back(filename.substr(0, ext));
+                }
+            }
+        } while (FindNextFile(hFind, &findData));
+        FindClose(hFind);
+    }
+
+    return presets;
+}
+
+void PopulatePresetCombo() {
+    SendMessage(g_hPresetCombo, CB_RESETCONTENT, 0, 0);
+
+    std::vector<std::wstring> presets = GetAvailablePresets();
+    for (const auto& preset : presets) {
+        SendMessage(g_hPresetCombo, CB_ADDSTRING, 0, (LPARAM)preset.c_str());
+    }
+
+    if (!presets.empty()) {
+        SendMessage(g_hPresetCombo, CB_SETCURSEL, 0, 0);
+    }
+}
+
+std::vector<std::wstring> GetCheckedProcessNames() {
+    std::vector<std::wstring> processNames;
+
+    if (!g_supportsProcessCapture) {
+        return processNames;
+    }
+
+    int itemCount = ListView_GetItemCount(g_hProcessList);
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hProcessList, i)) {
+            wchar_t processName[256];
+            ListView_GetItemText(g_hProcessList, i, 0, processName, 256);
+            processNames.push_back(processName);
+        }
+    }
+
+    return processNames;
+}
+
+void CheckProcessesByNames(const std::vector<std::wstring>& names) {
+    if (!g_supportsProcessCapture || names.empty()) {
+        return;
+    }
+
+    // First, uncheck all processes
+    int itemCount = ListView_GetItemCount(g_hProcessList);
+    for (int i = 0; i < itemCount; i++) {
+        ListView_SetCheckState(g_hProcessList, i, FALSE);
+    }
+
+    // Then check processes that match the names
+    for (int i = 0; i < itemCount; i++) {
+        wchar_t processName[256];
+        ListView_GetItemText(g_hProcessList, i, 0, processName, 256);
+
+        for (const auto& name : names) {
+            if (_wcsicmp(processName, name.c_str()) == 0) {
+                ListView_SetCheckState(g_hProcessList, i, TRUE);
+                break;
+            }
+        }
+    }
+}
+
+json GetCurrentSettingsAsJson() {
+    json settings;
+
+    // Output path
+    wchar_t outputPath[MAX_PATH];
+    GetWindowTextW(g_hOutputPath, outputPath, MAX_PATH);
+    settings["outputPath"] = WStringToString(outputPath);
+
+    // Format and bitrates
+    settings["format"] = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
+    settings["mp3Bitrate"] = (int)SendMessage(g_hMp3BitrateCombo, CB_GETCURSEL, 0, 0);
+    settings["opusBitrate"] = (int)SendMessage(g_hOpusBitrateCombo, CB_GETCURSEL, 0, 0);
+    settings["flacCompression"] = (int)SendMessage(g_hFlacCompressionCombo, CB_GETCURSEL, 0, 0);
+
+    // Options
+    settings["skipSilence"] = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["passthrough"] = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["passthroughDeviceIndex"] = (int)SendMessage(g_hPassthroughDeviceCombo, CB_GETCURSEL, 0, 0);
+    settings["monitorOnly"] = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["recordingMode"] = (int)SendMessage(g_hRecordingModeCombo, CB_GETCURSEL, 0, 0);
+    settings["captureMicrophone"] = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["microphoneDeviceIndex"] = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
+
+    // Volumes
+    settings["processVolume"] = g_processVolume;
+    settings["microphoneVolume"] = g_microphoneVolume;
+
+    // Process names
+    std::vector<std::wstring> processNames = GetCheckedProcessNames();
+    json processNamesJson = json::array();
+    for (const auto& name : processNames) {
+        processNamesJson.push_back(WStringToString(name));
+    }
+    settings["processNames"] = processNamesJson;
+
+    return settings;
+}
+
+void ApplySettingsFromJson(const json& preset) {
+    try {
+        // Load output path
+        if (preset.contains("outputPath") && preset["outputPath"].is_string()) {
+            SetWindowTextW(g_hOutputPath, StringToWString(preset["outputPath"]).c_str());
+        }
+
+        // Load format
+        if (preset.contains("format") && preset["format"].is_number_integer()) {
+            int formatIndex = preset["format"];
+            if (formatIndex >= 0 && formatIndex <= 3) {
+                SendMessage(g_hFormatCombo, CB_SETCURSEL, formatIndex, 0);
+            }
+        }
+
+        // Load bitrates
+        if (preset.contains("mp3Bitrate") && preset["mp3Bitrate"].is_number_integer()) {
+            int bitrateIndex = preset["mp3Bitrate"];
+            if (bitrateIndex >= 0 && bitrateIndex <= 3) {
+                SendMessage(g_hMp3BitrateCombo, CB_SETCURSEL, bitrateIndex, 0);
+            }
+        }
+
+        if (preset.contains("opusBitrate") && preset["opusBitrate"].is_number_integer()) {
+            int bitrateIndex = preset["opusBitrate"];
+            if (bitrateIndex >= 0 && bitrateIndex <= 4) {
+                SendMessage(g_hOpusBitrateCombo, CB_SETCURSEL, bitrateIndex, 0);
+            }
+        }
+
+        if (preset.contains("flacCompression") && preset["flacCompression"].is_number_integer()) {
+            int compressionIndex = preset["flacCompression"];
+            if (compressionIndex >= 0 && compressionIndex <= 8) {
+                SendMessage(g_hFlacCompressionCombo, CB_SETCURSEL, compressionIndex, 0);
+            }
+        }
+
+        // Load options
+        if (preset.contains("skipSilence") && preset["skipSilence"].is_boolean()) {
+            SendMessage(g_hSkipSilenceCheckbox, BM_SETCHECK, preset["skipSilence"] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (preset.contains("passthrough") && preset["passthrough"].is_boolean()) {
+            SendMessage(g_hPassthroughCheckbox, BM_SETCHECK, preset["passthrough"] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (preset.contains("passthroughDeviceIndex") && preset["passthroughDeviceIndex"].is_number_integer()) {
+            int deviceIndex = preset["passthroughDeviceIndex"];
+            if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hPassthroughDeviceCombo, CB_GETCOUNT, 0, 0)) {
+                SendMessage(g_hPassthroughDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
+            }
+        }
+
+        if (preset.contains("monitorOnly") && preset["monitorOnly"].is_boolean()) {
+            SendMessage(g_hMonitorOnlyCheckbox, BM_SETCHECK, preset["monitorOnly"] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (preset.contains("recordingMode") && preset["recordingMode"].is_number_integer()) {
+            int recordingMode = preset["recordingMode"];
+            if (recordingMode >= 0 && recordingMode <= 2) {
+                SendMessage(g_hRecordingModeCombo, CB_SETCURSEL, recordingMode, 0);
+            }
+        }
+
+        if (preset.contains("captureMicrophone") && preset["captureMicrophone"].is_boolean()) {
+            SendMessage(g_hMicrophoneCheckbox, BM_SETCHECK, preset["captureMicrophone"] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+
+        if (preset.contains("microphoneDeviceIndex") && preset["microphoneDeviceIndex"].is_number_integer()) {
+            int deviceIndex = preset["microphoneDeviceIndex"];
+            if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hMicrophoneDeviceCombo, CB_GETCOUNT, 0, 0)) {
+                SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
+            }
+        }
+
+        // Load volumes
+        if (preset.contains("processVolume") && preset["processVolume"].is_number()) {
+            float volume = preset["processVolume"];
+            if (volume >= 0.0f && volume <= 100.0f) {
+                g_processVolume = volume;
+                SendMessage(g_hProcessVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
+                wchar_t volumeText[64];
+                swprintf_s(volumeText, L"Process Volume: %d%%", (int)volume);
+                SetWindowText(g_hProcessVolumeLabel, volumeText);
+            }
+        }
+
+        if (preset.contains("microphoneVolume") && preset["microphoneVolume"].is_number()) {
+            float volume = preset["microphoneVolume"];
+            if (volume >= 0.0f && volume <= 100.0f) {
+                g_microphoneVolume = volume;
+                SendMessage(g_hMicrophoneVolumeSlider, TBM_SETPOS, TRUE, (int)volume);
+                wchar_t volumeText[64];
+                swprintf_s(volumeText, L"Microphone Volume: %d%%", (int)volume);
+                SetWindowText(g_hMicrophoneVolumeLabel, volumeText);
+            }
+        }
+
+        // Load process names and check them
+        if (preset.contains("processNames") && preset["processNames"].is_array()) {
+            std::vector<std::wstring> processNames;
+            for (const auto& name : preset["processNames"]) {
+                if (name.is_string()) {
+                    processNames.push_back(StringToWString(name));
+                }
+            }
+            CheckProcessesByNames(processNames);
+        }
+
+        // Update UI visibility based on loaded settings
+        OnFormatChanged();
+        OnPassthroughCheckboxChanged();
+        OnMonitorOnlyCheckboxChanged();
+        OnMicrophoneCheckboxChanged();
+
+    } catch (...) {
+        MessageBox(g_hWnd, L"Error loading preset settings.", L"Preset Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void SavePreset() {
+    // Prompt for preset name
+    wchar_t presetName[256] = L"";
+
+    // Create a simple input dialog using InputBox pattern
+    HWND hDlg = CreateWindowEx(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"STATIC",
+        L"Save Preset",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        (GetSystemMetrics(SM_CXSCREEN) - 300) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - 150) / 2,
+        300, 150,
+        g_hWnd,
+        nullptr,
+        g_hInst,
+        nullptr
+    );
+
+    if (!hDlg) {
+        // Fallback: Use a simple message box to get name (not ideal but works)
+        // For now, use a default name with timestamp
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        swprintf_s(presetName, L"Preset_%04d%02d%02d_%02d%02d%02d",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    } else {
+        DestroyWindow(hDlg);
+        // For simplicity, use timestamp-based name
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        swprintf_s(presetName, L"Preset_%04d%02d%02d_%02d%02d%02d",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    }
+
+    // Validate preset name
+    if (wcslen(presetName) == 0) {
+        return;
+    }
+
+    // Get current settings as JSON
+    json preset = GetCurrentSettingsAsJson();
+
+    // Build preset file path
+    std::wstring presetsDir = GetPresetsDirectory();
+    std::wstring presetPath = presetsDir + L"\\" + presetName + L".json";
+
+    // Save to file
+    std::ofstream file(presetPath);
+    if (file.is_open()) {
+        file << preset.dump(4);
+        file.close();
+
+        // Refresh preset combo
+        PopulatePresetCombo();
+
+        // Select the newly saved preset
+        int index = (int)SendMessage(g_hPresetCombo, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)presetName);
+        if (index != CB_ERR) {
+            SendMessage(g_hPresetCombo, CB_SETCURSEL, index, 0);
+        }
+
+        std::wstring msg = L"Preset saved as: " + std::wstring(presetName);
+        SetWindowText(g_hStatusText, msg.c_str());
+    } else {
+        MessageBox(g_hWnd, L"Failed to save preset.", L"Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void LoadPreset() {
+    // Get selected preset name
+    int index = (int)SendMessage(g_hPresetCombo, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) {
+        MessageBox(g_hWnd, L"Please select a preset to load.", L"No Preset Selected", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    wchar_t presetName[256];
+    SendMessage(g_hPresetCombo, CB_GETLBTEXT, index, (LPARAM)presetName);
+
+    // Build preset file path
+    std::wstring presetsDir = GetPresetsDirectory();
+    std::wstring presetPath = presetsDir + L"\\" + presetName + L".json";
+
+    // Load from file
+    std::ifstream file(presetPath);
+    if (file.is_open()) {
+        try {
+            json preset = json::parse(file);
+            file.close();
+
+            // Apply settings
+            ApplySettingsFromJson(preset);
+
+            std::wstring msg = L"Preset loaded: " + std::wstring(presetName);
+            SetWindowText(g_hStatusText, msg.c_str());
+        } catch (...) {
+            file.close();
+            MessageBox(g_hWnd, L"Failed to parse preset file.", L"Error", MB_OK | MB_ICONERROR);
+        }
+    } else {
+        MessageBox(g_hWnd, L"Failed to load preset file.", L"Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void DeletePreset() {
+    // Get selected preset name
+    int index = (int)SendMessage(g_hPresetCombo, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) {
+        MessageBox(g_hWnd, L"Please select a preset to delete.", L"No Preset Selected", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    wchar_t presetName[256];
+    SendMessage(g_hPresetCombo, CB_GETLBTEXT, index, (LPARAM)presetName);
+
+    // Confirm deletion
+    std::wstring msg = L"Delete preset \"" + std::wstring(presetName) + L"\"?";
+    if (MessageBox(g_hWnd, msg.c_str(), L"Confirm Delete", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+
+    // Build preset file path
+    std::wstring presetsDir = GetPresetsDirectory();
+    std::wstring presetPath = presetsDir + L"\\" + presetName + L".json";
+
+    // Delete file
+    if (DeleteFile(presetPath.c_str())) {
+        // Refresh preset combo
+        PopulatePresetCombo();
+
+        std::wstring statusMsg = L"Preset deleted: " + std::wstring(presetName);
+        SetWindowText(g_hStatusText, statusMsg.c_str());
+    } else {
+        MessageBox(g_hWnd, L"Failed to delete preset file.", L"Error", MB_OK | MB_ICONERROR);
+    }
 }
