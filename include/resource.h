@@ -41,3 +41,9 @@
 // Menu IDs
 #define IDM_EXIT                2001
 #define IDM_ABOUT               2002
+
+// Tray Icon IDs
+#define WM_TRAYICON             (WM_USER + 100)
+#define IDI_TRAY_ICON           3001
+#define IDM_TRAY_SHOW           3002
+#define IDM_TRAY_EXIT           3003

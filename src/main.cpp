@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <shlwapi.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -69,6 +70,10 @@ std::vector<ProcessInfo> g_processes;
 bool g_useWinRT = false;  // Track whether we initialized with WinRT or COM
 bool g_supportsProcessCapture = false;  // Track whether OS supports process-specific capture
 
+// Tray icon
+NOTIFYICONDATA g_nid = {};
+bool g_isMinimizedToTray = false;
+
 // Window class name
 const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
 
@@ -93,6 +98,11 @@ void OnPassthroughCheckboxChanged();
 void OnMonitorOnlyCheckboxChanged();
 void PopulateMicrophoneDevices();
 void OnMicrophoneCheckboxChanged();
+void AddTrayIcon();
+void RemoveTrayIcon();
+void ShowTrayContextMenu();
+void ShowWindowFromTray();
+void HideWindowToTray();
 
 // Helper to detect Windows version
 bool IsWindows8OrGreater() {
@@ -346,11 +356,41 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 OnMicrophoneCheckboxChanged();
             }
             break;
+
+        case IDM_TRAY_SHOW:
+            ShowWindowFromTray();
+            break;
+
+        case IDM_TRAY_EXIT:
+            RemoveTrayIcon();
+            PostQuitMessage(0);
+            break;
+        }
+        return 0;
+    }
+
+    case WM_TRAYICON: {
+        switch (lParam) {
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+            // Left-click or double-click: restore window
+            ShowWindowFromTray();
+            break;
+
+        case WM_RBUTTONUP:
+            // Right-click: show context menu
+            ShowTrayContextMenu();
+            break;
         }
         return 0;
     }
 
     case WM_SIZE: {
+        // Handle minimize to tray
+        if (wParam == SIZE_MINIMIZED) {
+            HideWindowToTray();
+            return 0;
+        }
         // Resize controls when window is resized
         RECT rcClient;
         GetClientRect(hwnd, &rcClient);
@@ -388,6 +428,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_DESTROY:
+        RemoveTrayIcon();
         SaveSettings();
         g_captureManager->StopAllCaptures();
         PostQuitMessage(0);
@@ -1816,4 +1857,76 @@ void OnMicrophoneCheckboxChanged() {
     ShowWindow(g_hMicrophoneDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hMicrophoneVolumeLabel, isChecked ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hMicrophoneVolumeSlider, isChecked ? SW_SHOW : SW_HIDE);
+}
+
+void AddTrayIcon() {
+    // Initialize the NOTIFYICONDATA structure
+    ZeroMemory(&g_nid, sizeof(NOTIFYICONDATA));
+    g_nid.cbSize = sizeof(NOTIFYICONDATA);
+    g_nid.hWnd = g_hWnd;
+    g_nid.uID = IDI_TRAY_ICON;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+
+    // Set tooltip text
+    const wchar_t* tooltip = g_supportsProcessCapture ?
+        L"Audio Capture - Per-Process Recording" :
+        L"Audio Capture - System Audio";
+    wcscpy_s(g_nid.szTip, sizeof(g_nid.szTip) / sizeof(wchar_t), tooltip);
+
+    // Add the icon to the system tray
+    Shell_NotifyIcon(NIM_ADD, &g_nid);
+    g_isMinimizedToTray = true;
+}
+
+void RemoveTrayIcon() {
+    if (g_isMinimizedToTray) {
+        Shell_NotifyIcon(NIM_DELETE, &g_nid);
+        g_isMinimizedToTray = false;
+    }
+}
+
+void ShowTrayContextMenu() {
+    // Create a popup menu
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+
+    // Add menu items
+    AppendMenu(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show Window");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
+
+    // Set default menu item (bold)
+    SetMenuDefaultItem(hMenu, IDM_TRAY_SHOW, FALSE);
+
+    // Get cursor position for menu display
+    POINT pt;
+    GetCursorPos(&pt);
+
+    // Required for proper menu behavior with taskbar
+    SetForegroundWindow(g_hWnd);
+
+    // Show the menu
+    TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, g_hWnd, nullptr);
+
+    // Clean up
+    DestroyMenu(hMenu);
+}
+
+void ShowWindowFromTray() {
+    // Remove tray icon
+    RemoveTrayIcon();
+
+    // Restore the window
+    ShowWindow(g_hWnd, SW_RESTORE);
+    SetForegroundWindow(g_hWnd);
+}
+
+void HideWindowToTray() {
+    // Hide the window
+    ShowWindow(g_hWnd, SW_HIDE);
+
+    // Add tray icon
+    AddTrayIcon();
 }
