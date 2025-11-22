@@ -28,10 +28,16 @@ public:
 private:
     void WriteWavHeader();
     void UpdateWavHeader();
+    bool SplitToNextFile();  // Open next file part seamlessly
+
+    static constexpr UINT64 MAX_FILE_SIZE = 4000000000ULL; // ~3.7GB safety limit
 
     std::ofstream m_file;
     std::wstring m_filename;
+    std::wstring m_baseFilename;     // Base filename without extension
     std::vector<BYTE> m_formatData;  // Store full format (WAVEFORMATEX or WAVEFORMATEXTENSIBLE)
-    UINT32 m_dataSize;
+    UINT32 m_dataSize;               // Data size in current file
+    UINT64 m_totalDataSize;          // Total data written across all parts
+    UINT32 m_filePartNumber;         // Current file part (1, 2, 3...)
     std::streampos m_dataStartPos;
 };

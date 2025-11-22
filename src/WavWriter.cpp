@@ -3,6 +3,8 @@
 
 WavWriter::WavWriter()
     : m_dataSize(0)
+    , m_totalDataSize(0)
+    , m_filePartNumber(1)
     , m_dataStartPos(0)
 {
 }
@@ -18,6 +20,18 @@ bool WavWriter::Open(const std::wstring& filename, const WAVEFORMATEX* format) {
 
     m_filename = filename;
     m_dataSize = 0;
+
+    // Extract base filename (remove extension) for multi-part file naming
+    size_t extPos = filename.rfind(L'.');
+    if (extPos != std::wstring::npos) {
+        m_baseFilename = filename.substr(0, extPos);
+    } else {
+        m_baseFilename = filename;
+    }
+
+    // Reset file part number for new recording
+    m_filePartNumber = 1;
+    m_totalDataSize = 0;
 
     // Calculate format size
     UINT32 formatSize = sizeof(WAVEFORMATEX);
@@ -47,10 +61,57 @@ bool WavWriter::WriteData(const BYTE* data, UINT32 size) {
         return false;
     }
 
+    // Calculate current file size (header + data)
+    // WAV header structure: RIFF(4) + size(4) + WAVE(4) + fmt(4) + fmtsize(4) + fmtdata + data(4) + datasize(4) + audiodata
+    UINT64 currentFileSize = 12 + 8 + static_cast<UINT64>(m_formatData.size()) + 8 + m_dataSize;
+
+    // Check if writing this data would exceed the 4GB limit
+    if (currentFileSize + size > MAX_FILE_SIZE) {
+        // Split to next file part before writing
+        if (!SplitToNextFile()) {
+            return false;
+        }
+    }
+
     m_file.write(reinterpret_cast<const char*>(data), size);
     m_dataSize += size;
+    m_totalDataSize += size;
 
     return m_file.good();
+}
+
+bool WavWriter::SplitToNextFile() {
+    // Update current file's header with final sizes
+    UpdateWavHeader();
+
+    // Close current file
+    m_file.close();
+
+    // Increment part number
+    m_filePartNumber++;
+
+    // Generate new filename: baseFilename_part2.wav, baseFilename_part3.wav, etc.
+    wchar_t partSuffix[32];
+    swprintf_s(partSuffix, L"_part%u.wav", m_filePartNumber);
+    std::wstring newFilename = m_baseFilename + partSuffix;
+
+    // Reset data size for new file
+    m_dataSize = 0;
+
+    // Open new file
+    m_file.open(newFilename, std::ios::binary | std::ios::out);
+    if (!m_file.is_open()) {
+        return false;
+    }
+
+    // Write header for new file
+    WriteWavHeader();
+    m_dataStartPos = m_file.tellp();
+
+    // Update current filename
+    m_filename = newFilename;
+
+    return true;
 }
 
 void WavWriter::Close() {
