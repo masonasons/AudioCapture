@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <algorithm>
 #include <nlohmann/json.hpp>
 #include "resource.h"
 #include "ProcessEnumerator.h"
@@ -958,6 +959,12 @@ void RefreshProcessList() {
 
     ListView_DeleteAllItems(g_hProcessList);
     g_processes = g_processEnum->GetAllProcesses();
+
+    // Sort processes naturally by name (case-insensitive)
+    std::sort(g_processes.begin(), g_processes.end(),
+        [](const ProcessInfo& a, const ProcessInfo& b) {
+            return StrCmpLogicalW(a.processName.c_str(), b.processName.c_str()) < 0;
+        });
 
     // Check if we should filter by active audio
     bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
