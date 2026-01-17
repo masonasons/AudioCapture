@@ -499,9 +499,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // Position preset controls (always at top)
         SetWindowPos(g_hPresetLabel, nullptr, 10, 10, 50, 20, SWP_NOZORDER);
         SetWindowPos(g_hPresetCombo, nullptr, 60, 7, 200, 200, SWP_NOZORDER);
-        SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 60, 25, SWP_NOZORDER);
-        SetWindowPos(g_hLoadPresetBtn, nullptr, 335, 7, 60, 25, SWP_NOZORDER);
-        SetWindowPos(g_hDeletePresetBtn, nullptr, 400, 7, 60, 25, SWP_NOZORDER);
+        SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hLoadPresetBtn, nullptr, 375, 7, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hDeletePresetBtn, nullptr, 480, 7, 110, 25, SWP_NOZORDER);
 
         // Adjust control positions and sizes based on whether process list is visible
         // Added 30 pixels to account for preset controls
@@ -581,7 +581,7 @@ void InitializeControls(HWND hwnd) {
     // ========== Preset Controls (always visible) ==========
     // Preset label
     g_hPresetLabel = CreateWindow(
-        L"STATIC", L"Preset:",
+        L"STATIC", L"&Preset:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 10, 50, 20,
         hwnd, (HMENU)IDC_PRESET_LABEL, g_hInst, nullptr
@@ -597,31 +597,31 @@ void InitializeControls(HWND hwnd) {
 
     // Save preset button
     g_hSavePresetBtn = CreateWindow(
-        L"BUTTON", L"Save",
+        L"BUTTON", L"Sa&ve Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        270, 7, 60, 25,
+        270, 7, 100, 25,
         hwnd, (HMENU)IDC_SAVE_PRESET_BTN, g_hInst, nullptr
     );
 
     // Load preset button
     g_hLoadPresetBtn = CreateWindow(
-        L"BUTTON", L"Load",
+        L"BUTTON", L"&Load Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        335, 7, 60, 25,
+        375, 7, 100, 25,
         hwnd, (HMENU)IDC_LOAD_PRESET_BTN, g_hInst, nullptr
     );
 
     // Delete preset button
     g_hDeletePresetBtn = CreateWindow(
-        L"BUTTON", L"Delete",
+        L"BUTTON", L"&Delete Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        400, 7, 60, 25,
+        480, 7, 110, 25,
         hwnd, (HMENU)IDC_DELETE_PRESET_BTN, g_hInst, nullptr
     );
 
     // Process list label (moved down to make room for presets)
     g_hProcessListLabel = CreateWindow(
-        L"STATIC", L"Available &Processes:",
+        L"STATIC", L"&Available processes:",
         processListVisibility | SS_LEFT,
         10, 40, 200, 20,
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
