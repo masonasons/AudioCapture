@@ -622,7 +622,7 @@ void InitializeControls(HWND hwnd) {
 
     // Process list label (moved down to make room for presets)
     g_hProcessListLabel = CreateWindow(
-        L"STATIC", L"Available Processes:",
+        L"STATIC", L"Available &Processes:",
         processListVisibility | SS_LEFT,
         10, 40, 200, 20,
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
@@ -681,7 +681,7 @@ void InitializeControls(HWND hwnd) {
 
     // Format label (only visible when process list is hidden)
     g_hFormatLabel = CreateWindow(
-        L"STATIC", L"Format:",
+        L"STATIC", L"&Format:",
         WS_CHILD | (g_supportsProcessCapture ? 0 : WS_VISIBLE) | SS_LEFT,
         10, -15, 60, 20,
         hwnd, nullptr, g_hInst, nullptr
@@ -779,7 +779,7 @@ void InitializeControls(HWND hwnd) {
 
     // Passthrough checkbox
     g_hPassthroughCheckbox = CreateWindow(
-        L"BUTTON", L"Monitor audio",
+        L"BUTTON", L"&Monitor audio",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         420, 247, 120, 20,
         hwnd, (HMENU)IDC_PASSTHROUGH_CHECKBOX, g_hInst, nullptr
@@ -831,7 +831,7 @@ void InitializeControls(HWND hwnd) {
 
     // Microphone capture checkbox
     g_hMicrophoneCheckbox = CreateWindow(
-        L"BUTTON", L"Capture inputs",
+        L"BUTTON", L"Capture &inputs",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         310, 330, 140, 20,
         hwnd, (HMENU)IDC_MICROPHONE_CHECKBOX, g_hInst, nullptr
@@ -902,7 +902,7 @@ void InitializeControls(HWND hwnd) {
 
     // Output path label
     g_hOutputPathLabel = CreateWindow(
-        L"STATIC", L"Output Folder:",
+        L"STATIC", L"&Output Folder:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 275, 100, 20,
         hwnd, (HMENU)IDC_OUTPUT_PATH_LABEL, g_hInst, nullptr
@@ -920,7 +920,7 @@ void InitializeControls(HWND hwnd) {
 
     // Browse button
     g_hBrowseBtn = CreateWindow(
-        L"BUTTON", L"Browse...",
+        L"BUTTON", L"&Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         700, 295, 75, 25,
         hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
