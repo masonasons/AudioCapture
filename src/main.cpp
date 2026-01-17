@@ -1094,8 +1094,11 @@ void StartCapture() {
             if (focusedIndex >= 0) {
                 checkedIndices.push_back(focusedIndex);
             } else {
-                MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
-                return;
+                bool captureInputsOnly = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                if (!captureInputsOnly) {
+                    MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
+                    return;
+                }
             }
         }
     }
