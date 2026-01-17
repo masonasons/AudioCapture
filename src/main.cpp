@@ -64,6 +64,9 @@ HWND g_hPresetCombo;
 HWND g_hSavePresetBtn;
 HWND g_hLoadPresetBtn;
 HWND g_hDeletePresetBtn;
+HWND g_hLastFocusedCtrl = nullptr;
+bool g_isAppActive = true;
+const UINT WM_APP_RESTORE_FOCUS = WM_APP + 1;
 
 // Volume settings (0-100%)
 float g_processVolume = 100.0f;  // Default to 100%
@@ -92,6 +95,7 @@ void RefreshProcessList();
 void StartCapture();
 void StopCapture();
 void UpdateRecordingList();
+void EnsureRecordingListFocusItem();
 void BrowseOutputFolder();
 void OnFormatChanged();
 std::wstring GetDefaultOutputPath();
@@ -269,6 +273,46 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+    case WM_ACTIVATE: {
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            g_hLastFocusedCtrl = GetFocus();
+        } else {
+            HWND target = g_hLastFocusedCtrl ? g_hLastFocusedCtrl : g_hRecordingList;
+            if (target && IsWindow(target)) {
+                PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+            }
+        }
+        return 0;
+    }
+
+    case WM_ACTIVATEAPP:
+        g_isAppActive = (wParam != 0);
+        if (g_isAppActive) {
+            HWND target = g_hLastFocusedCtrl ? g_hLastFocusedCtrl : g_hRecordingList;
+            if (target && IsWindow(target)) {
+                PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+            }
+        }
+        return 0;
+
+    case WM_APP_RESTORE_FOCUS: {
+        HWND target = (HWND)wParam;
+        if (target && IsWindow(target)) {
+            SendMessage(hwnd, WM_NEXTDLGCTL, (WPARAM)target, TRUE);
+        }
+        return 0;
+    }
+
+    case WM_SETFOCUS: {
+        auto sessions = g_captureManager ? g_captureManager->GetActiveSessions() : std::vector<CaptureSession*>{};
+        if (!sessions.empty()) {
+            SetFocus(g_hRecordingList);
+            EnsureRecordingListFocusItem();
+            return 0;
+        }
+        break;
+    }
+
     case WM_CREATE:
         InitializeControls(hwnd);
         LoadSettings();
@@ -291,6 +335,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         PopulatePassthroughDevices();
         PopulateMicrophoneDevices();
         return 0;
+
+    case WM_NOTIFY: {
+        LPNMHDR hdr = (LPNMHDR)lParam;
+        if (hdr && hdr->hwndFrom == g_hRecordingList && hdr->code == LVN_KEYDOWN) {
+            NMLVKEYDOWN* key = (NMLVKEYDOWN*)lParam;
+            if (key->wVKey == VK_TAB) {
+                bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                HWND next = GetNextDlgTabItem(hwnd, g_hRecordingList, shiftDown);
+                if (next && IsWindow(next)) {
+                    SendMessage(hwnd, WM_NEXTDLGCTL, (WPARAM)next, TRUE);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
 
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
@@ -1500,10 +1560,17 @@ void UpdateRecordingList() {
 
     // Restore selection if the item still exists
     if (newSelectedIndex >= 0) {
+        UINT stateMask = LVIS_SELECTED;
+        UINT state = LVIS_SELECTED;
+        if (g_isAppActive) {
+            stateMask |= LVIS_FOCUSED;
+            state |= LVIS_FOCUSED;
+        }
         ListView_SetItemState(g_hRecordingList, newSelectedIndex,
-            LVIS_SELECTED | LVIS_FOCUSED,
-            LVIS_SELECTED | LVIS_FOCUSED);
+            state,
+            stateMask);
     }
+    EnsureRecordingListFocusItem();
 
     // Show/enable Stop All, Pause All, and Resume All buttons if there are multiple captures
     if (sessions.size() >= 2) {
@@ -1537,6 +1604,20 @@ void UpdateRecordingList() {
         EnableWindow(g_hPauseAllBtn, FALSE);
         ShowWindow(g_hResumeAllBtn, SW_HIDE);
         EnableWindow(g_hResumeAllBtn, FALSE);
+    }
+}
+
+void EnsureRecordingListFocusItem() {
+    int focusedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_FOCUSED);
+    if (focusedIndex < 0) {
+        int selectedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED);
+        if (selectedIndex >= 0) {
+            ListView_SetItemState(g_hRecordingList, selectedIndex,
+                LVIS_FOCUSED, LVIS_FOCUSED);
+        } else if (ListView_GetItemCount(g_hRecordingList) > 0) {
+            ListView_SetItemState(g_hRecordingList, 0,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        }
     }
 }
 
