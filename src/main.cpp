@@ -25,7 +25,6 @@ HWND g_hWnd;
 HWND g_hProcessList;
 HWND g_hRefreshBtn;
 HWND g_hStartBtn;
-HWND g_hStopBtn;
 HWND g_hStopAllBtn;
 HWND g_hPauseAllBtn;
 HWND g_hResumeAllBtn;
@@ -67,6 +66,7 @@ HWND g_hDeletePresetBtn;
 HWND g_hLastFocusedCtrl = nullptr;
 bool g_isAppActive = true;
 const UINT WM_APP_RESTORE_FOCUS = WM_APP + 1;
+bool g_captureButtonStops = false;
 
 // Volume settings (0-100%)
 float g_processVolume = 100.0f;  // Default to 100%
@@ -362,11 +362,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             break;
 
         case IDC_START_BTN:
-            StartCapture();
-            break;
-
-        case IDC_STOP_BTN:
-            StopCapture();
+            SetFocus(g_hStartBtn);
+            if (g_captureButtonStops) {
+                StopCapture();
+            } else {
+                StartCapture();
+            }
             break;
 
         case IDC_STOP_ALL_BTN:
@@ -375,7 +376,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 g_captureManager->StopAllCaptures();
                 // Then disable mixed recording (mixer thread can exit cleanly)
                 g_captureManager->DisableMixedRecording();
-                EnableWindow(g_hStopBtn, FALSE);
                 EnableWindow(g_hStopAllBtn, FALSE);
                 ShowWindow(g_hStopAllBtn, SW_HIDE);
                 UpdateRecordingList();
@@ -523,8 +523,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50, 75, 25, SWP_NOZORDER);
         SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85, 140, 20, SWP_NOZORDER);
         SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82, 150, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopBtn, nullptr, 120, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 210, 30, SWP_NOZORDER);
         SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115, 100, 30, SWP_NOZORDER);
@@ -926,20 +925,12 @@ void InitializeControls(HWND hwnd) {
         hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
     );
 
-    // Start button
+    // Start/stop toggle button
     g_hStartBtn = CreateWindow(
-        L"BUTTON", L"Start Capture",
+        L"BUTTON", L"&Start Capture",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 360, 100, 30,
+        10, 360, 210, 30,
         hwnd, (HMENU)IDC_START_BTN, g_hInst, nullptr
-    );
-
-    // Stop button
-    g_hStopBtn = CreateWindow(
-        L"BUTTON", L"Stop Capture",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        120, 360, 100, 30,
-        hwnd, (HMENU)IDC_STOP_BTN, g_hInst, nullptr
     );
 
     // Stop All button (initially hidden)
@@ -1458,7 +1449,6 @@ void StartCapture() {
     }
 
     if (startedCount > 0) {
-        EnableWindow(g_hStopBtn, TRUE);
         UpdateRecordingList();
         std::wstring status = L"Started " + std::to_wstring(startedCount) + L" capture(s)";
         if (alreadyCapturingCount > 0) {
@@ -1493,7 +1483,6 @@ void StopCapture() {
 
         auto sessions = g_captureManager->GetActiveSessions();
         if (sessions.empty()) {
-            EnableWindow(g_hStopBtn, FALSE);
             g_captureManager->DisableMixedRecording(); // Stop mixed recording if no more sessions
         }
 
@@ -1571,6 +1560,8 @@ void UpdateRecordingList() {
             stateMask);
     }
     EnsureRecordingListFocusItem();
+    g_captureButtonStops = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED) >= 0;
+    SetWindowText(g_hStartBtn, g_captureButtonStops ? L"&Stop Capture" : L"&Start Capture");
 
     // Show/enable Stop All, Pause All, and Resume All buttons if there are multiple captures
     if (sessions.size() >= 2) {
