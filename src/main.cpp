@@ -94,6 +94,8 @@ void BrowseOutputFolder();
 void OnFormatChanged();
 std::wstring GetDefaultOutputPath();
 std::wstring FormatFileSize(UINT64 bytes);
+std::wstring NormalizeOutputPath(const std::wstring& path);
+bool EnsureDirectoryExists(const std::wstring& path);
 void LoadSettings();
 void SaveSettings();
 std::wstring GetSettingsFilePath();
@@ -1088,6 +1090,10 @@ void StartCapture() {
     // Get output path
     wchar_t outputPath[MAX_PATH];
     GetWindowText(g_hOutputPath, outputPath, MAX_PATH);
+    std::wstring normalizedOutputPath = NormalizeOutputPath(outputPath);
+    if (normalizedOutputPath != outputPath) {
+        SetWindowText(g_hOutputPath, normalizedOutputPath.c_str());
+    }
 
     // Get format
     int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
@@ -1170,6 +1176,16 @@ void StartCapture() {
     bool createSeparateFiles = (totalSources == 1) || (recordingModeIndex == 0) || (recordingModeIndex == 2);
     bool createCombinedFile = (totalSources > 1) && !monitorOnly && ((recordingModeIndex == 1) || (recordingModeIndex == 2));
 
+    if ((createSeparateFiles || createCombinedFile) && normalizedOutputPath.empty()) {
+        MessageBox(g_hWnd, L"Please choose a valid output folder.", L"Invalid Output Folder", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    if ((createSeparateFiles || createCombinedFile) && !EnsureDirectoryExists(normalizedOutputPath)) {
+        MessageBox(g_hWnd, L"The output folder could not be created or accessed.", L"Invalid Output Folder", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
     int startedCount = 0;
     int alreadyCapturingCount = 0;
 
@@ -1219,7 +1235,7 @@ void StartCapture() {
         bool captureMonitorOnly = monitorOnly;
 
         if (createSeparateFiles && !monitorOnly) {
-            std::wstring basePath = outputPath;
+            std::wstring basePath = normalizedOutputPath;
             if (basePath.back() != L'\\') {
                 basePath += L'\\';
             }
@@ -1251,7 +1267,7 @@ void StartCapture() {
     // If combined file mode is enabled, start the mixer
     if (createCombinedFile && startedCount > 0) {
         // Build combined file path
-        std::wstring combinedPath = outputPath;
+        std::wstring combinedPath = normalizedOutputPath;
         if (combinedPath.back() != L'\\') {
             combinedPath += L'\\';
         }
@@ -1310,7 +1326,7 @@ void StartCapture() {
 
                 // Build microphone file path if needed
                 if (createMicFile) {
-                    std::wstring basePath = outputPath;
+                    std::wstring basePath = normalizedOutputPath;
                     if (basePath.back() != L'\\') {
                         basePath += L'\\';
                     }
@@ -1547,6 +1563,48 @@ std::wstring FormatFileSize(UINT64 bytes) {
     wchar_t buffer[64];
     swprintf_s(buffer, L"%.2f %s", size, units[unitIndex]);
     return buffer;
+}
+
+std::wstring NormalizeOutputPath(const std::wstring& path) {
+    std::wstring trimmed = path;
+
+    auto isSpace = [](wchar_t ch) {
+        return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+    };
+
+    while (!trimmed.empty() && isSpace(trimmed.front())) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && isSpace(trimmed.back())) {
+        trimmed.pop_back();
+    }
+
+    if (trimmed.size() >= 2 && trimmed.front() == L'\"' && trimmed.back() == L'\"') {
+        trimmed = trimmed.substr(1, trimmed.size() - 2);
+    }
+
+    while (!trimmed.empty() && isSpace(trimmed.front())) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && isSpace(trimmed.back())) {
+        trimmed.pop_back();
+    }
+
+    return trimmed;
+}
+
+bool EnsureDirectoryExists(const std::wstring& path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    int result = SHCreateDirectoryExW(nullptr, path.c_str(), nullptr);
+    if (result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS) {
+        DWORD attrs = GetFileAttributesW(path.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES) && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    return false;
 }
 
 // Helper functions for string conversion
