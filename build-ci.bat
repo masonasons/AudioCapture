@@ -14,10 +14,14 @@ if defined VCPKG_ROOT (
 	set "VCPKG_TOOLCHAIN=C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
 )
 
-if not exist "build" (
-	mkdir build
+set "NEED_CONFIG="
+if not exist "build\\CMakeCache.txt" set "NEED_CONFIG=1"
+if not exist "build\\AudioCapture.sln" set "NEED_CONFIG=1"
+
+if defined NEED_CONFIG (
+	if not exist "build" mkdir build
 	cd build
-	%CMAKE_EXE% .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=%VCPKG_TOOLCHAIN% -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
+	%CMAKE_EXE% .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=%VCPKG_TOOLCHAIN% -DVCPKG_TARGET_TRIPLET=x64-windows-static
 	if errorlevel 1 (
 		echo ERROR: CMake configuration failed
 		cd ..
