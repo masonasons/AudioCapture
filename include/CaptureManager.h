@@ -27,7 +27,7 @@ struct CaptureSession {
     std::unique_ptr<AudioCapture> capture;
     std::unique_ptr<WavWriter> wavWriter;
     std::unique_ptr<Mp3Encoder> mp3Encoder;
-    std::unique_ptr<OpusEncoder> opusEncoder;
+    std::unique_ptr<OpusOggEncoder> opusEncoder;
     std::unique_ptr<FlacEncoder> flacEncoder;
     bool isActive;
     UINT64 bytesWritten;
@@ -93,7 +93,7 @@ private:
     std::unique_ptr<AudioMixer> m_mixer;
     std::unique_ptr<WavWriter> m_mixedWavWriter;
     std::unique_ptr<Mp3Encoder> m_mixedMp3Encoder;
-    std::unique_ptr<OpusEncoder> m_mixedOpusEncoder;
+    std::unique_ptr<OpusOggEncoder> m_mixedOpusEncoder;
     std::unique_ptr<FlacEncoder> m_mixedFlacEncoder;
     AudioFormat m_mixedFormat;
     std::unique_ptr<std::thread> m_mixerThread;

@@ -77,10 +77,10 @@ All builds are fully static with no external DLL dependencies, making them immed
 
 1. Install vcpkg dependencies with static runtime:
 ```cmd
-vcpkg install libflac:x64-windows-static-mt opus:x64-windows-static-mt libogg:x64-windows-static-mt nlohmann-json:x64-windows-static-mt
+vcpkg install libflac:x64-windows-static opus:x64-windows-static libogg:x64-windows-static nlohmann-json:x64-windows-static
 ```
 
-Note: The `x64-windows-static-mt` triplet ensures static linking of both the libraries and the C/C++ runtime, resulting in a fully self-contained executable with no DLL dependencies.
+Note: The `x64-windows-static` triplet ensures static linking of both the libraries and the C/C++ runtime, resulting in a fully self-contained executable with no DLL dependencies.
 
 ### Using the Build Script
 
@@ -107,7 +107,7 @@ cd build
 
 3. Generate Visual Studio project files with vcpkg and static runtime:
 ```cmd
-cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-mt
+cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 ```
 
 4. Build the project:

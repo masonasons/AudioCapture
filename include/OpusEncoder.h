@@ -8,10 +8,10 @@
 #include <opus/opus.h>
 #include <ogg/ogg.h>
 
-class OpusEncoder {
+class OpusOggEncoder {
 public:
-    OpusEncoder();
-    ~OpusEncoder();
+    OpusOggEncoder();
+    ~OpusOggEncoder();
 
     // Open Opus file for writing (OGG container)
     bool Open(const std::wstring& filename, const WAVEFORMATEX* format, UINT32 bitrate = 128000);
@@ -37,7 +37,7 @@ private:
     WAVEFORMATEX m_format;
 
     // Opus encoder and OGG stream
-    OpusEncoder* m_opusEncoder;
+    ::OpusEncoder* m_opusEncoder;
     ogg_stream_state m_oggStream;
     ogg_page m_oggPage;
     ogg_packet m_oggPacket;
