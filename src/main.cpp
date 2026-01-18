@@ -67,6 +67,7 @@ HWND g_hLastFocusedCtrl = nullptr;
 bool g_isAppActive = true;
 const UINT WM_APP_RESTORE_FOCUS = WM_APP + 1;
 bool g_captureButtonStops = false;
+bool g_restoreFocusOnActivate = false;
 
 // Volume settings (0-100%)
 float g_processVolume = 100.0f;  // Default to 100%
@@ -276,10 +277,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_ACTIVATE: {
         if (LOWORD(wParam) == WA_INACTIVE) {
             g_hLastFocusedCtrl = GetFocus();
+            g_restoreFocusOnActivate = true;
         } else {
-            HWND target = g_hLastFocusedCtrl ? g_hLastFocusedCtrl : g_hRecordingList;
-            if (target && IsWindow(target)) {
-                PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+            if (g_restoreFocusOnActivate) {
+                HWND target = g_hLastFocusedCtrl;
+                if (!target || !IsWindow(target)) {
+                    target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
+                }
+                if (target && IsWindow(target)) {
+                    PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+                }
+                g_restoreFocusOnActivate = false;
             }
         }
         return 0;
@@ -288,29 +296,42 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_ACTIVATEAPP:
         g_isAppActive = (wParam != 0);
         if (g_isAppActive) {
-            HWND target = g_hLastFocusedCtrl ? g_hLastFocusedCtrl : g_hRecordingList;
-            if (target && IsWindow(target)) {
-                PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+            if (g_restoreFocusOnActivate) {
+                HWND target = g_hLastFocusedCtrl;
+                if (!target || !IsWindow(target)) {
+                    target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
+                }
+                if (target && IsWindow(target)) {
+                    PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+                }
+                g_restoreFocusOnActivate = false;
             }
+        } else {
+            g_restoreFocusOnActivate = true;
         }
         return 0;
 
     case WM_APP_RESTORE_FOCUS: {
         HWND target = (HWND)wParam;
         if (target && IsWindow(target)) {
-            SendMessage(hwnd, WM_NEXTDLGCTL, (WPARAM)target, TRUE);
+            SetFocus(target);
+            if (target == g_hRecordingList) {
+                EnsureRecordingListFocusItem();
+            }
         }
         return 0;
     }
 
     case WM_SETFOCUS: {
-        auto sessions = g_captureManager ? g_captureManager->GetActiveSessions() : std::vector<CaptureSession*>{};
-        if (!sessions.empty()) {
-            SetFocus(g_hRecordingList);
-            EnsureRecordingListFocusItem();
-            return 0;
+        HWND target = g_hLastFocusedCtrl;
+        if (!target || !IsWindow(target)) {
+            target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
         }
-        break;
+        SetFocus(target);
+        if (target == g_hRecordingList) {
+            EnsureRecordingListFocusItem();
+        }
+        return 0;
     }
 
     case WM_CREATE:
