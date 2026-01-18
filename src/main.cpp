@@ -25,7 +25,6 @@ HWND g_hWnd;
 HWND g_hProcessList;
 HWND g_hRefreshBtn;
 HWND g_hStartBtn;
-HWND g_hStopBtn;
 HWND g_hStopAllBtn;
 HWND g_hPauseAllBtn;
 HWND g_hResumeAllBtn;
@@ -52,7 +51,7 @@ HWND g_hMonitorOnlyCheckbox;
 HWND g_hRecordingModeCombo;
 HWND g_hRecordingModeLabel;
 HWND g_hMicrophoneCheckbox;
-HWND g_hMicrophoneDeviceCombo;
+HWND g_hMicrophoneDeviceList;
 HWND g_hMicrophoneDeviceLabel;
 HWND g_hFormatLabel;
 HWND g_hProcessVolumeSlider;
@@ -64,6 +63,11 @@ HWND g_hPresetCombo;
 HWND g_hSavePresetBtn;
 HWND g_hLoadPresetBtn;
 HWND g_hDeletePresetBtn;
+HWND g_hLastFocusedCtrl = nullptr;
+bool g_isAppActive = true;
+const UINT WM_APP_RESTORE_FOCUS = WM_APP + 1;
+bool g_captureButtonStops = false;
+bool g_restoreFocusOnActivate = false;
 
 // Volume settings (0-100%)
 float g_processVolume = 100.0f;  // Default to 100%
@@ -73,6 +77,8 @@ std::unique_ptr<ProcessEnumerator> g_processEnum;
 std::unique_ptr<CaptureManager> g_captureManager;
 std::unique_ptr<AudioDeviceEnumerator> g_audioDeviceEnum;
 std::vector<ProcessInfo> g_processes;
+std::vector<std::wstring> g_pendingMicrophoneDeviceIds;
+int g_pendingMicrophoneDeviceIndex = -1;
 bool g_useWinRT = false;  // Track whether we initialized with WinRT or COM
 bool g_supportsProcessCapture = false;  // Track whether OS supports process-specific capture
 
@@ -90,10 +96,14 @@ void RefreshProcessList();
 void StartCapture();
 void StopCapture();
 void UpdateRecordingList();
+void EnsureRecordingListFocusItem();
 void BrowseOutputFolder();
 void OnFormatChanged();
 std::wstring GetDefaultOutputPath();
 std::wstring FormatFileSize(UINT64 bytes);
+std::wstring NormalizeOutputPath(const std::wstring& path);
+bool EnsureDirectoryExists(const std::wstring& path);
+std::wstring SanitizeFileName(const std::wstring& name);
 void LoadSettings();
 void SaveSettings();
 std::wstring GetSettingsFilePath();
@@ -115,6 +125,9 @@ void PopulatePresetCombo();
 json GetCurrentSettingsAsJson();
 void ApplySettingsFromJson(const json& preset);
 std::vector<std::wstring> GetCheckedProcessNames();
+std::vector<size_t> GetCheckedMicrophoneDeviceIndices();
+std::vector<std::wstring> GetCheckedMicrophoneDeviceIds();
+void ApplyMicrophoneSelection(const std::vector<std::wstring>& deviceIds, int fallbackIndex);
 void CheckProcessesByNames(const std::vector<std::wstring>& names);
 void SavePreset();
 void LoadPreset();
@@ -261,6 +274,66 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+    case WM_ACTIVATE: {
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            g_hLastFocusedCtrl = GetFocus();
+            g_restoreFocusOnActivate = true;
+        } else {
+            if (g_restoreFocusOnActivate) {
+                HWND target = g_hLastFocusedCtrl;
+                if (!target || !IsWindow(target)) {
+                    target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
+                }
+                if (target && IsWindow(target)) {
+                    PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+                }
+                g_restoreFocusOnActivate = false;
+            }
+        }
+        return 0;
+    }
+
+    case WM_ACTIVATEAPP:
+        g_isAppActive = (wParam != 0);
+        if (g_isAppActive) {
+            if (g_restoreFocusOnActivate) {
+                HWND target = g_hLastFocusedCtrl;
+                if (!target || !IsWindow(target)) {
+                    target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
+                }
+                if (target && IsWindow(target)) {
+                    PostMessage(hwnd, WM_APP_RESTORE_FOCUS, (WPARAM)target, 0);
+                }
+                g_restoreFocusOnActivate = false;
+            }
+        } else {
+            g_restoreFocusOnActivate = true;
+        }
+        return 0;
+
+    case WM_APP_RESTORE_FOCUS: {
+        HWND target = (HWND)wParam;
+        if (target && IsWindow(target)) {
+            SetFocus(target);
+            if (target == g_hRecordingList) {
+                EnsureRecordingListFocusItem();
+            }
+        }
+        return 0;
+    }
+
+    case WM_SETFOCUS: {
+        HWND target = g_hLastFocusedCtrl;
+        if (!target || !IsWindow(target)) {
+            target = g_supportsProcessCapture ? g_hProcessList : g_hStartBtn;
+        }
+        SetFocus(target);
+        if (target == g_hRecordingList) {
+            EnsureRecordingListFocusItem();
+        }
+        return 0;
+    }
+
     case WM_CREATE:
         InitializeControls(hwnd);
         LoadSettings();
@@ -284,6 +357,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         PopulateMicrophoneDevices();
         return 0;
 
+    case WM_NOTIFY: {
+        LPNMHDR hdr = (LPNMHDR)lParam;
+        if (hdr && hdr->hwndFrom == g_hRecordingList && hdr->code == LVN_KEYDOWN) {
+            NMLVKEYDOWN* key = (NMLVKEYDOWN*)lParam;
+            if (key->wVKey == VK_TAB) {
+                bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                HWND next = GetNextDlgTabItem(hwnd, g_hRecordingList, shiftDown);
+                if (next && IsWindow(next)) {
+                    SendMessage(hwnd, WM_NEXTDLGCTL, (WPARAM)next, TRUE);
+                    return TRUE;
+                }
+            }
+        }
+        break;
+    }
+
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
         int wmEvent = HIWORD(wParam);
@@ -294,11 +383,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             break;
 
         case IDC_START_BTN:
-            StartCapture();
-            break;
-
-        case IDC_STOP_BTN:
-            StopCapture();
+            SetFocus(g_hStartBtn);
+            if (g_captureButtonStops) {
+                StopCapture();
+            } else {
+                StartCapture();
+            }
             break;
 
         case IDC_STOP_ALL_BTN:
@@ -307,7 +397,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 g_captureManager->StopAllCaptures();
                 // Then disable mixed recording (mixer thread can exit cleanly)
                 g_captureManager->DisableMixedRecording();
-                EnableWindow(g_hStopBtn, FALSE);
                 EnableWindow(g_hStopAllBtn, FALSE);
                 ShowWindow(g_hStopAllBtn, SW_HIDE);
                 UpdateRecordingList();
@@ -431,9 +520,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // Position preset controls (always at top)
         SetWindowPos(g_hPresetLabel, nullptr, 10, 10, 50, 20, SWP_NOZORDER);
         SetWindowPos(g_hPresetCombo, nullptr, 60, 7, 200, 200, SWP_NOZORDER);
-        SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 60, 25, SWP_NOZORDER);
-        SetWindowPos(g_hLoadPresetBtn, nullptr, 335, 7, 60, 25, SWP_NOZORDER);
-        SetWindowPos(g_hDeletePresetBtn, nullptr, 400, 7, 60, 25, SWP_NOZORDER);
+        SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hLoadPresetBtn, nullptr, 375, 7, 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hDeletePresetBtn, nullptr, 480, 7, 110, 25, SWP_NOZORDER);
 
         // Adjust control positions and sizes based on whether process list is visible
         // Added 30 pixels to account for preset controls
@@ -455,8 +544,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50, 75, 25, SWP_NOZORDER);
         SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85, 140, 20, SWP_NOZORDER);
         SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82, 150, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopBtn, nullptr, 120, topOffset + 115, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 210, 30, SWP_NOZORDER);
         SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115, 100, 30, SWP_NOZORDER);
         SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115, 100, 30, SWP_NOZORDER);
@@ -514,7 +602,7 @@ void InitializeControls(HWND hwnd) {
     // ========== Preset Controls (always visible) ==========
     // Preset label
     g_hPresetLabel = CreateWindow(
-        L"STATIC", L"Preset:",
+        L"STATIC", L"&Preset:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 10, 50, 20,
         hwnd, (HMENU)IDC_PRESET_LABEL, g_hInst, nullptr
@@ -530,31 +618,31 @@ void InitializeControls(HWND hwnd) {
 
     // Save preset button
     g_hSavePresetBtn = CreateWindow(
-        L"BUTTON", L"Save",
+        L"BUTTON", L"Sa&ve Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        270, 7, 60, 25,
+        270, 7, 100, 25,
         hwnd, (HMENU)IDC_SAVE_PRESET_BTN, g_hInst, nullptr
     );
 
     // Load preset button
     g_hLoadPresetBtn = CreateWindow(
-        L"BUTTON", L"Load",
+        L"BUTTON", L"&Load Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        335, 7, 60, 25,
+        375, 7, 100, 25,
         hwnd, (HMENU)IDC_LOAD_PRESET_BTN, g_hInst, nullptr
     );
 
     // Delete preset button
     g_hDeletePresetBtn = CreateWindow(
-        L"BUTTON", L"Delete",
+        L"BUTTON", L"&Delete Preset",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        400, 7, 60, 25,
+        480, 7, 110, 25,
         hwnd, (HMENU)IDC_DELETE_PRESET_BTN, g_hInst, nullptr
     );
 
     // Process list label (moved down to make room for presets)
     g_hProcessListLabel = CreateWindow(
-        L"STATIC", L"Available Processes:",
+        L"STATIC", L"&Available processes:",
         processListVisibility | SS_LEFT,
         10, 40, 200, 20,
         hwnd, (HMENU)IDC_PROCESS_LIST_LABEL, g_hInst, nullptr
@@ -613,7 +701,7 @@ void InitializeControls(HWND hwnd) {
 
     // Format label (only visible when process list is hidden)
     g_hFormatLabel = CreateWindow(
-        L"STATIC", L"Format:",
+        L"STATIC", L"&Format:",
         WS_CHILD | (g_supportsProcessCapture ? 0 : WS_VISIBLE) | SS_LEFT,
         10, -15, 60, 20,
         hwnd, nullptr, g_hInst, nullptr
@@ -711,7 +799,7 @@ void InitializeControls(HWND hwnd) {
 
     // Passthrough checkbox
     g_hPassthroughCheckbox = CreateWindow(
-        L"BUTTON", L"Monitor audio",
+        L"BUTTON", L"&Monitor audio",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         420, 247, 120, 20,
         hwnd, (HMENU)IDC_PASSTHROUGH_CHECKBOX, g_hInst, nullptr
@@ -763,7 +851,7 @@ void InitializeControls(HWND hwnd) {
 
     // Microphone capture checkbox
     g_hMicrophoneCheckbox = CreateWindow(
-        L"BUTTON", L"Capture microphone",
+        L"BUTTON", L"Capture &inputs",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         310, 330, 140, 20,
         hwnd, (HMENU)IDC_MICROPHONE_CHECKBOX, g_hInst, nullptr
@@ -771,19 +859,28 @@ void InitializeControls(HWND hwnd) {
 
     // Microphone device label
     g_hMicrophoneDeviceLabel = CreateWindow(
-        L"STATIC", L"Microphone:",
+        L"STATIC", L"Input devices:",
         WS_CHILD | SS_LEFT,
-        460, 333, 80, 20,
+        460, 333, 90, 20,
         hwnd, (HMENU)IDC_MICROPHONE_DEVICE_LABEL, g_hInst, nullptr
     );
 
-    // Microphone device combo box
-    g_hMicrophoneDeviceCombo = CreateWindow(
-        WC_COMBOBOX, L"",
-        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
-        540, 327, 230, 200,
-        hwnd, (HMENU)IDC_MICROPHONE_DEVICE_COMBO, g_hInst, nullptr
+    // Microphone device list (multi-select with checkboxes)
+    g_hMicrophoneDeviceList = CreateWindowEx(
+        WS_EX_CLIENTEDGE,
+        WC_LISTVIEW,
+        L"",
+        WS_CHILD | WS_TABSTOP | LVS_REPORT,
+        540, 327, 230, 80,
+        hwnd, (HMENU)IDC_MICROPHONE_DEVICE_LIST, g_hInst, nullptr
     );
+    ListView_SetExtendedListViewStyle(g_hMicrophoneDeviceList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+
+    LVCOLUMN lvcMic = {};
+    lvcMic.mask = LVCF_TEXT | LVCF_WIDTH;
+    lvcMic.cx = 210;
+    lvcMic.pszText = (LPWSTR)L"Microphones";
+    ListView_InsertColumn(g_hMicrophoneDeviceList, 0, &lvcMic);
 
     // Process volume label
     g_hProcessVolumeLabel = CreateWindow(
@@ -825,7 +922,7 @@ void InitializeControls(HWND hwnd) {
 
     // Output path label
     g_hOutputPathLabel = CreateWindow(
-        L"STATIC", L"Output Folder:",
+        L"STATIC", L"&Output Folder:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 275, 100, 20,
         hwnd, (HMENU)IDC_OUTPUT_PATH_LABEL, g_hInst, nullptr
@@ -843,26 +940,18 @@ void InitializeControls(HWND hwnd) {
 
     // Browse button
     g_hBrowseBtn = CreateWindow(
-        L"BUTTON", L"Browse...",
+        L"BUTTON", L"&Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         700, 295, 75, 25,
         hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
     );
 
-    // Start button
+    // Start/stop toggle button
     g_hStartBtn = CreateWindow(
-        L"BUTTON", L"Start Capture",
+        L"BUTTON", L"&Start Capture",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 360, 100, 30,
+        10, 360, 210, 30,
         hwnd, (HMENU)IDC_START_BTN, g_hInst, nullptr
-    );
-
-    // Stop button
-    g_hStopBtn = CreateWindow(
-        L"BUTTON", L"Stop Capture",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        120, 360, 100, 30,
-        hwnd, (HMENU)IDC_STOP_BTN, g_hInst, nullptr
     );
 
     // Stop All button (initially hidden)
@@ -891,7 +980,7 @@ void InitializeControls(HWND hwnd) {
 
     // Recording list label
     g_hRecordingListLabel = CreateWindow(
-        L"STATIC", L"Active Recordings:",
+        L"STATIC", L"Active &Recordings:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 400, 200, 20,
         hwnd, (HMENU)IDC_RECORDING_LIST_LABEL, g_hInst, nullptr
@@ -1079,8 +1168,11 @@ void StartCapture() {
             if (focusedIndex >= 0) {
                 checkedIndices.push_back(focusedIndex);
             } else {
-                MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
-                return;
+                bool captureInputsOnly = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                if (!captureInputsOnly) {
+                    MessageBox(g_hWnd, L"Please check one or more processes, or focus on a process to capture.", L"No Process Selected", MB_OK | MB_ICONWARNING);
+                    return;
+                }
             }
         }
     }
@@ -1088,6 +1180,10 @@ void StartCapture() {
     // Get output path
     wchar_t outputPath[MAX_PATH];
     GetWindowText(g_hOutputPath, outputPath, MAX_PATH);
+    std::wstring normalizedOutputPath = NormalizeOutputPath(outputPath);
+    if (normalizedOutputPath != outputPath) {
+        SetWindowText(g_hOutputPath, normalizedOutputPath.c_str());
+    }
 
     // Get format
     int formatIndex = (int)SendMessage(g_hFormatCombo, CB_GETCURSEL, 0, 0);
@@ -1154,13 +1250,35 @@ void StartCapture() {
     // Get monitor-only option
     bool monitorOnly = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-    // Check if microphone is enabled (counts as an additional source)
+    // Check if input capture is enabled (counts as additional sources)
     bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    std::vector<size_t> micDeviceIndices;
+    if (captureMicrophone && !monitorOnly && g_audioDeviceEnum) {
+        micDeviceIndices = GetCheckedMicrophoneDeviceIndices();
+
+        if (micDeviceIndices.empty()) {
+            int focusedIndex = ListView_GetNextItem(g_hMicrophoneDeviceList, -1, LVNI_FOCUSED);
+            if (focusedIndex >= 0) {
+                LVITEM item = {};
+                item.mask = LVIF_PARAM;
+                item.iItem = focusedIndex;
+                if (ListView_GetItem(g_hMicrophoneDeviceList, &item)) {
+                    micDeviceIndices.push_back(static_cast<size_t>(item.lParam));
+                }
+            }
+        }
+
+        if (micDeviceIndices.empty()) {
+            MessageBox(g_hWnd, L"Please check one or more input devices to capture.", L"No Input Device Selected", MB_OK | MB_ICONWARNING);
+            return;
+        }
+    }
 
     // Calculate total number of audio sources (processes + microphone)
     size_t totalSources = checkedIndices.size();
     if (captureMicrophone && !monitorOnly) {
-        totalSources++; // Microphone counts as an additional source
+        totalSources += micDeviceIndices.size(); // Each input device counts as a source
     }
 
     // Get recording mode (only relevant if multiple sources and not monitor-only)
@@ -1169,6 +1287,16 @@ void StartCapture() {
 
     bool createSeparateFiles = (totalSources == 1) || (recordingModeIndex == 0) || (recordingModeIndex == 2);
     bool createCombinedFile = (totalSources > 1) && !monitorOnly && ((recordingModeIndex == 1) || (recordingModeIndex == 2));
+
+    if ((createSeparateFiles || createCombinedFile) && normalizedOutputPath.empty()) {
+        MessageBox(g_hWnd, L"Please choose a valid output folder.", L"Invalid Output Folder", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    if ((createSeparateFiles || createCombinedFile) && !EnsureDirectoryExists(normalizedOutputPath)) {
+        MessageBox(g_hWnd, L"The output folder could not be created or accessed.", L"Invalid Output Folder", MB_OK | MB_ICONWARNING);
+        return;
+    }
 
     int startedCount = 0;
     int alreadyCapturingCount = 0;
@@ -1219,7 +1347,7 @@ void StartCapture() {
         bool captureMonitorOnly = monitorOnly;
 
         if (createSeparateFiles && !monitorOnly) {
-            std::wstring basePath = outputPath;
+            std::wstring basePath = normalizedOutputPath;
             if (basePath.back() != L'\\') {
                 basePath += L'\\';
             }
@@ -1251,7 +1379,7 @@ void StartCapture() {
     // If combined file mode is enabled, start the mixer
     if (createCombinedFile && startedCount > 0) {
         // Build combined file path
-        std::wstring combinedPath = outputPath;
+        std::wstring combinedPath = normalizedOutputPath;
         if (combinedPath.back() != L'\\') {
             combinedPath += L'\\';
         }
@@ -1273,89 +1401,75 @@ void StartCapture() {
 
     // Handle microphone capture if enabled (and not in monitor-only mode)
     if (captureMicrophone && !monitorOnly && g_audioDeviceEnum) {
-        // Get microphone device ID
-        int micDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
         const auto& inputDevices = g_audioDeviceEnum->GetInputDevices();
+        const DWORD kMicrophoneSessionBaseId = 0xFFFF0000;
 
-        if (micDeviceIndex >= 0 && micDeviceIndex < static_cast<int>(inputDevices.size())) {
-            std::wstring micDeviceId = inputDevices[micDeviceIndex].deviceId;
-            std::wstring micDeviceName = inputDevices[micDeviceIndex].friendlyName;
+        for (size_t micDeviceIndex : micDeviceIndices) {
+            if (micDeviceIndex >= inputDevices.size()) {
+                continue;
+            }
 
-            // Use special process ID for microphone (0xFFFFFFFE)
-            DWORD micProcessId = 0xFFFFFFFE;
+            const auto& device = inputDevices[micDeviceIndex];
+            std::wstring micDeviceId = device.deviceId;
+            std::wstring micDeviceName = device.friendlyName;
 
-            // Check if already capturing microphone
-            if (!g_captureManager->IsCapturing(micProcessId)) {
-                // Determine microphone capture mode based on recording mode
-                bool createMicFile = false;
-                bool micMonitorOnly = false;
-                std::wstring micFilePath;
+            DWORD micProcessId = kMicrophoneSessionBaseId + static_cast<DWORD>(micDeviceIndex);
 
-                if (createSeparateFiles) {
-                    // Separate files mode: Create mic file
-                    createMicFile = true;
+            if (g_captureManager->IsCapturing(micProcessId)) {
+                alreadyCapturingCount++;
+                continue;
+            }
+
+            bool createMicFile = createSeparateFiles;
+            bool micMonitorOnly = false;
+            std::wstring micFilePath;
+
+            if (createCombinedFile && !createSeparateFiles) {
+                micMonitorOnly = true;
+            }
+
+            if (createMicFile) {
+                std::wstring basePath = normalizedOutputPath;
+                if (basePath.back() != L'\\') {
+                    basePath += L'\\';
                 }
 
-                if (createCombinedFile) {
-                    // Combined file mode: Send to mixer only (monitor-only mode)
-                    if (!createSeparateFiles) {
-                        // Combined only - microphone is monitor-only (sends to mixer)
-                        micMonitorOnly = true;
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                wchar_t timestamp[64];
+                swprintf_s(timestamp, L"%04d_%02d_%02d-%02d_%02d_%02d",
+                    st.wYear, st.wMonth, st.wDay,
+                    st.wHour, st.wMinute, st.wSecond);
+
+                std::wstring deviceLabel = SanitizeFileName(micDeviceName);
+                micFilePath = basePath + deviceLabel + L"-" + std::wstring(timestamp) + extension;
+            } else {
+                micFilePath = L"";
+            }
+
+            if (g_captureManager->StartCaptureFromDevice(
+                micProcessId,
+                micDeviceName,
+                micDeviceId,
+                true, // isInputDevice
+                micFilePath,
+                format,
+                bitrate,
+                skipSilence,
+                micMonitorOnly)) {
+                auto sessions = g_captureManager->GetActiveSessions();
+                for (auto* session : sessions) {
+                    if (session->processId == micProcessId && session->capture) {
+                        session->capture->SetVolume(g_microphoneVolume / 100.0f);
+                        break;
                     }
-                    // If both createSeparateFiles and createCombinedFile are true (Both mode),
-                    // then createMicFile=true and micMonitorOnly=false, which means:
-                    // - Mic creates its own file
-                    // - Mic also sends to mixer (via OnAudioData callback)
                 }
-
-                // Build microphone file path if needed
-                if (createMicFile) {
-                    std::wstring basePath = outputPath;
-                    if (basePath.back() != L'\\') {
-                        basePath += L'\\';
-                    }
-
-                    // Get current time for timestamp
-                    SYSTEMTIME st;
-                    GetLocalTime(&st);
-                    wchar_t timestamp[64];
-                    swprintf_s(timestamp, L"%04d_%02d_%02d-%02d_%02d_%02d",
-                        st.wYear, st.wMonth, st.wDay,
-                        st.wHour, st.wMinute, st.wSecond);
-
-                    micFilePath = basePath + L"Microphone-" + std::wstring(timestamp) + extension;
-                } else {
-                    // Monitor-only mode, no file path needed
-                    micFilePath = L"";
-                }
-
-                // Start microphone capture
-                if (g_captureManager->StartCaptureFromDevice(
-                    micProcessId,
-                    micDeviceName,
-                    micDeviceId,
-                    true, // isInputDevice
-                    micFilePath,
-                    format,
-                    bitrate,
-                    skipSilence,
-                    micMonitorOnly)) {
-                    // Apply microphone volume setting (convert from 0-100 to 0.0-1.0)
-                    auto sessions = g_captureManager->GetActiveSessions();
-                    for (auto* session : sessions) {
-                        if (session->processId == micProcessId && session->capture) {
-                            session->capture->SetVolume(g_microphoneVolume / 100.0f);
-                            break;
-                        }
-                    }
-                    startedCount++;
-                }
+                startedCount++;
             }
         }
     }
 
     if (startedCount > 0) {
-        EnableWindow(g_hStopBtn, TRUE);
         UpdateRecordingList();
         std::wstring status = L"Started " + std::to_wstring(startedCount) + L" capture(s)";
         if (alreadyCapturingCount > 0) {
@@ -1364,7 +1478,7 @@ void StartCapture() {
         SetWindowText(g_hStatusText, status.c_str());
     }
     else if (alreadyCapturingCount > 0) {
-        MessageBox(g_hWnd, L"All selected processes are already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
+        MessageBox(g_hWnd, L"All selected sources are already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
     }
     else {
         MessageBox(g_hWnd, L"Failed to start any captures.", L"Capture Error", MB_OK | MB_ICONERROR);
@@ -1390,7 +1504,6 @@ void StopCapture() {
 
         auto sessions = g_captureManager->GetActiveSessions();
         if (sessions.empty()) {
-            EnableWindow(g_hStopBtn, FALSE);
             g_captureManager->DisableMixedRecording(); // Stop mixed recording if no more sessions
         }
 
@@ -1457,10 +1570,19 @@ void UpdateRecordingList() {
 
     // Restore selection if the item still exists
     if (newSelectedIndex >= 0) {
+        UINT stateMask = LVIS_SELECTED;
+        UINT state = LVIS_SELECTED;
+        if (g_isAppActive) {
+            stateMask |= LVIS_FOCUSED;
+            state |= LVIS_FOCUSED;
+        }
         ListView_SetItemState(g_hRecordingList, newSelectedIndex,
-            LVIS_SELECTED | LVIS_FOCUSED,
-            LVIS_SELECTED | LVIS_FOCUSED);
+            state,
+            stateMask);
     }
+    EnsureRecordingListFocusItem();
+    g_captureButtonStops = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED) >= 0;
+    SetWindowText(g_hStartBtn, g_captureButtonStops ? L"&Stop Capture" : L"&Start Capture");
 
     // Show/enable Stop All, Pause All, and Resume All buttons if there are multiple captures
     if (sessions.size() >= 2) {
@@ -1494,6 +1616,20 @@ void UpdateRecordingList() {
         EnableWindow(g_hPauseAllBtn, FALSE);
         ShowWindow(g_hResumeAllBtn, SW_HIDE);
         EnableWindow(g_hResumeAllBtn, FALSE);
+    }
+}
+
+void EnsureRecordingListFocusItem() {
+    int focusedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_FOCUSED);
+    if (focusedIndex < 0) {
+        int selectedIndex = ListView_GetNextItem(g_hRecordingList, -1, LVNI_SELECTED);
+        if (selectedIndex >= 0) {
+            ListView_SetItemState(g_hRecordingList, selectedIndex,
+                LVIS_FOCUSED, LVIS_FOCUSED);
+        } else if (ListView_GetItemCount(g_hRecordingList) > 0) {
+            ListView_SetItemState(g_hRecordingList, 0,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        }
     }
 }
 
@@ -1547,6 +1683,68 @@ std::wstring FormatFileSize(UINT64 bytes) {
     wchar_t buffer[64];
     swprintf_s(buffer, L"%.2f %s", size, units[unitIndex]);
     return buffer;
+}
+
+std::wstring NormalizeOutputPath(const std::wstring& path) {
+    std::wstring trimmed = path;
+
+    auto isSpace = [](wchar_t ch) {
+        return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+    };
+
+    while (!trimmed.empty() && isSpace(trimmed.front())) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && isSpace(trimmed.back())) {
+        trimmed.pop_back();
+    }
+
+    if (trimmed.size() >= 2 && trimmed.front() == L'\"' && trimmed.back() == L'\"') {
+        trimmed = trimmed.substr(1, trimmed.size() - 2);
+    }
+
+    while (!trimmed.empty() && isSpace(trimmed.front())) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && isSpace(trimmed.back())) {
+        trimmed.pop_back();
+    }
+
+    return trimmed;
+}
+
+bool EnsureDirectoryExists(const std::wstring& path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    int result = SHCreateDirectoryExW(nullptr, path.c_str(), nullptr);
+    if (result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS) {
+        DWORD attrs = GetFileAttributesW(path.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES) && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }
+
+    return false;
+}
+
+std::wstring SanitizeFileName(const std::wstring& name) {
+    if (name.empty()) {
+        return L"Device";
+    }
+
+    std::wstring sanitized = name;
+    const wchar_t* invalidChars = L"\\/:*?\"<>|";
+    for (auto& ch : sanitized) {
+        if (wcschr(invalidChars, ch)) {
+            ch = L'_';
+        }
+    }
+
+    while (!sanitized.empty() && (sanitized.back() == L'.' || sanitized.back() == L' ')) {
+        sanitized.pop_back();
+    }
+
+    return sanitized.empty() ? L"Device" : sanitized;
 }
 
 // Helper functions for string conversion
@@ -1664,15 +1862,6 @@ void LoadSettings() {
                 SendMessage(g_hMicrophoneCheckbox, BM_SETCHECK, captureMicrophone ? BST_CHECKED : BST_UNCHECKED, 0);
             }
 
-            // Load microphone device index
-            if (settings.contains("microphoneDeviceIndex") && settings["microphoneDeviceIndex"].is_number_integer()) {
-                int deviceIndex = settings["microphoneDeviceIndex"];
-                // Will be applied after device enumeration completes
-                if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hMicrophoneDeviceCombo, CB_GETCOUNT, 0, 0)) {
-                    SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
-                }
-            }
-
             // Load process volume
             if (settings.contains("processVolume") && settings["processVolume"].is_number()) {
                 float volume = settings["processVolume"];
@@ -1761,10 +1950,6 @@ void SaveSettings() {
     // Save microphone capture option
     bool captureMicrophone = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     settings["captureMicrophone"] = captureMicrophone;
-
-    // Save microphone device index
-    int microphoneDeviceIndex = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
-    settings["microphoneDeviceIndex"] = microphoneDeviceIndex;
 
     // Save volume settings
     settings["processVolume"] = g_processVolume;
@@ -1902,33 +2087,52 @@ void PopulateMicrophoneDevices() {
         return;
     }
 
-    // Clear existing items
-    SendMessage(g_hMicrophoneDeviceCombo, CB_RESETCONTENT, 0, 0);
+    ListView_DeleteAllItems(g_hMicrophoneDeviceList);
 
-    // Add devices to combo box
     const auto& devices = g_audioDeviceEnum->GetInputDevices();
     int defaultIndex = -1;
 
+    std::vector<size_t> sortedIndices;
+    sortedIndices.reserve(devices.size());
     for (size_t i = 0; i < devices.size(); i++) {
-        const AudioDeviceInfo& device = devices[i];
-
-        // Format name with (Default) suffix if it's the default device
-        std::wstring displayName = device.friendlyName;
-        if (device.isDefault) {
-            displayName += L" (Default)";
-            defaultIndex = static_cast<int>(i);
-        }
-
-        SendMessage(g_hMicrophoneDeviceCombo, CB_ADDSTRING, 0, (LPARAM)displayName.c_str());
-        // Store device index as item data
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETITEMDATA, i, (LPARAM)i);
+        sortedIndices.push_back(i);
     }
 
-    // Select default device
-    if (defaultIndex >= 0) {
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, defaultIndex, 0);
-    } else if (devices.size() > 0) {
-        SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, 0, 0);
+    std::sort(sortedIndices.begin(), sortedIndices.end(),
+        [&](size_t a, size_t b) {
+            if (devices[a].isDefault != devices[b].isDefault) {
+                return devices[a].isDefault;
+            }
+            return StrCmpLogicalW(devices[a].friendlyName.c_str(),
+                                  devices[b].friendlyName.c_str()) < 0;
+        });
+
+    for (size_t listIndex = 0; listIndex < sortedIndices.size(); listIndex++) {
+        size_t deviceIndex = sortedIndices[listIndex];
+        const AudioDeviceInfo& device = devices[deviceIndex];
+
+        std::wstring displayName = device.friendlyName;
+        if (device.isDefault) {
+            displayName = L"Default: " + displayName;
+            defaultIndex = static_cast<int>(listIndex);
+        }
+
+        LVITEM lvi = {};
+        lvi.mask = LVIF_TEXT | LVIF_PARAM;
+        lvi.iItem = static_cast<int>(listIndex);
+        lvi.pszText = (LPWSTR)displayName.c_str();
+        lvi.lParam = static_cast<LPARAM>(deviceIndex);
+        ListView_InsertItem(g_hMicrophoneDeviceList, &lvi);
+    }
+
+    if (!g_pendingMicrophoneDeviceIds.empty() || g_pendingMicrophoneDeviceIndex >= 0) {
+        ApplyMicrophoneSelection(g_pendingMicrophoneDeviceIds, g_pendingMicrophoneDeviceIndex);
+        g_pendingMicrophoneDeviceIds.clear();
+        g_pendingMicrophoneDeviceIndex = -1;
+    } else if (defaultIndex >= 0) {
+        ListView_SetCheckState(g_hMicrophoneDeviceList, defaultIndex, TRUE);
+    } else if (!devices.empty()) {
+        ListView_SetCheckState(g_hMicrophoneDeviceList, 0, TRUE);
     }
 
     // Initially hide microphone controls
@@ -1940,7 +2144,7 @@ void OnMicrophoneCheckboxChanged() {
     BOOL isChecked = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     ShowWindow(g_hMicrophoneDeviceLabel, isChecked ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_hMicrophoneDeviceCombo, isChecked ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hMicrophoneDeviceList, isChecked ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hMicrophoneVolumeLabel, isChecked ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hMicrophoneVolumeSlider, isChecked ? SW_SHOW : SW_HIDE);
 }
@@ -2090,6 +2294,87 @@ std::vector<std::wstring> GetCheckedProcessNames() {
     return processNames;
 }
 
+std::vector<size_t> GetCheckedMicrophoneDeviceIndices() {
+    std::vector<size_t> deviceIndices;
+
+    if (!g_hMicrophoneDeviceList) {
+        return deviceIndices;
+    }
+
+    int itemCount = ListView_GetItemCount(g_hMicrophoneDeviceList);
+    for (int i = 0; i < itemCount; i++) {
+        if (ListView_GetCheckState(g_hMicrophoneDeviceList, i)) {
+            LVITEM item = {};
+            item.mask = LVIF_PARAM;
+            item.iItem = i;
+            if (ListView_GetItem(g_hMicrophoneDeviceList, &item)) {
+                deviceIndices.push_back(static_cast<size_t>(item.lParam));
+            }
+        }
+    }
+
+    return deviceIndices;
+}
+
+std::vector<std::wstring> GetCheckedMicrophoneDeviceIds() {
+    std::vector<std::wstring> deviceIds;
+
+    if (!g_audioDeviceEnum) {
+        return deviceIds;
+    }
+
+    const auto& devices = g_audioDeviceEnum->GetInputDevices();
+    std::vector<size_t> indices = GetCheckedMicrophoneDeviceIndices();
+    for (size_t index : indices) {
+        if (index < devices.size()) {
+            deviceIds.push_back(devices[index].deviceId);
+        }
+    }
+
+    return deviceIds;
+}
+
+void ApplyMicrophoneSelection(const std::vector<std::wstring>& deviceIds, int fallbackIndex) {
+    if (!g_audioDeviceEnum || !g_hMicrophoneDeviceList) {
+        return;
+    }
+
+    const auto& devices = g_audioDeviceEnum->GetInputDevices();
+    int itemCount = ListView_GetItemCount(g_hMicrophoneDeviceList);
+
+    for (int i = 0; i < itemCount; i++) {
+        ListView_SetCheckState(g_hMicrophoneDeviceList, i, FALSE);
+    }
+
+    bool appliedSelection = false;
+    if (!deviceIds.empty()) {
+        for (int i = 0; i < itemCount; i++) {
+            LVITEM item = {};
+            item.mask = LVIF_PARAM;
+            item.iItem = i;
+            if (ListView_GetItem(g_hMicrophoneDeviceList, &item)) {
+                size_t deviceIndex = static_cast<size_t>(item.lParam);
+                if (deviceIndex < devices.size()) {
+                    const auto& deviceId = devices[deviceIndex].deviceId;
+                    if (std::find(deviceIds.begin(), deviceIds.end(), deviceId) != deviceIds.end()) {
+                        ListView_SetCheckState(g_hMicrophoneDeviceList, i, TRUE);
+                        appliedSelection = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!appliedSelection && fallbackIndex >= 0 && fallbackIndex < itemCount) {
+        ListView_SetCheckState(g_hMicrophoneDeviceList, fallbackIndex, TRUE);
+        appliedSelection = true;
+    }
+
+    if (!appliedSelection && itemCount > 0) {
+        ListView_SetCheckState(g_hMicrophoneDeviceList, 0, TRUE);
+    }
+}
+
 void CheckProcessesByNames(const std::vector<std::wstring>& names) {
     if (!g_supportsProcessCapture || names.empty()) {
         return;
@@ -2136,7 +2421,15 @@ json GetCurrentSettingsAsJson() {
     settings["monitorOnly"] = (SendMessage(g_hMonitorOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     settings["recordingMode"] = (int)SendMessage(g_hRecordingModeCombo, CB_GETCURSEL, 0, 0);
     settings["captureMicrophone"] = (SendMessage(g_hMicrophoneCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    settings["microphoneDeviceIndex"] = (int)SendMessage(g_hMicrophoneDeviceCombo, CB_GETCURSEL, 0, 0);
+    std::vector<std::wstring> micDeviceIds = GetCheckedMicrophoneDeviceIds();
+    json micDeviceIdsJson = json::array();
+    for (const auto& deviceId : micDeviceIds) {
+        micDeviceIdsJson.push_back(WStringToString(deviceId));
+    }
+    settings["microphoneDeviceIds"] = micDeviceIdsJson;
+
+    std::vector<size_t> micDeviceIndices = GetCheckedMicrophoneDeviceIndices();
+    settings["microphoneDeviceIndex"] = micDeviceIndices.empty() ? -1 : static_cast<int>(micDeviceIndices.front());
 
     // Volumes
     settings["processVolume"] = g_processVolume;
@@ -2221,10 +2514,26 @@ void ApplySettingsFromJson(const json& preset) {
             SendMessage(g_hMicrophoneCheckbox, BM_SETCHECK, preset["captureMicrophone"] ? BST_CHECKED : BST_UNCHECKED, 0);
         }
 
+        std::vector<std::wstring> micDeviceIds;
+        if (preset.contains("microphoneDeviceIds") && preset["microphoneDeviceIds"].is_array()) {
+            for (const auto& id : preset["microphoneDeviceIds"]) {
+                if (id.is_string()) {
+                    micDeviceIds.push_back(StringToWString(id));
+                }
+            }
+        }
+
+        int micDeviceIndex = -1;
         if (preset.contains("microphoneDeviceIndex") && preset["microphoneDeviceIndex"].is_number_integer()) {
-            int deviceIndex = preset["microphoneDeviceIndex"];
-            if (deviceIndex >= 0 && deviceIndex < SendMessage(g_hMicrophoneDeviceCombo, CB_GETCOUNT, 0, 0)) {
-                SendMessage(g_hMicrophoneDeviceCombo, CB_SETCURSEL, deviceIndex, 0);
+            micDeviceIndex = preset["microphoneDeviceIndex"];
+        }
+
+        if (!micDeviceIds.empty() || micDeviceIndex >= 0) {
+            if (ListView_GetItemCount(g_hMicrophoneDeviceList) > 0) {
+                ApplyMicrophoneSelection(micDeviceIds, micDeviceIndex);
+            } else {
+                g_pendingMicrophoneDeviceIds = micDeviceIds;
+                g_pendingMicrophoneDeviceIndex = micDeviceIndex;
             }
         }
 

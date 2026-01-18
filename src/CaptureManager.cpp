@@ -67,7 +67,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
             break;
 
         case AudioFormat::OPUS:
-            session->opusEncoder = std::make_unique<OpusEncoder>();
+            session->opusEncoder = std::make_unique<OpusOggEncoder>();
             // Use provided bitrate or default to 128000 (128 kbps)
             encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
                                                        bitrate > 0 ? bitrate : 128000);
@@ -148,7 +148,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
             break;
 
         case AudioFormat::OPUS:
-            session->opusEncoder = std::make_unique<OpusEncoder>();
+            session->opusEncoder = std::make_unique<OpusOggEncoder>();
             encoderReady = session->opusEncoder->Open(outputPath, waveFormat,
                                                        bitrate > 0 ? bitrate : 128000);
             break;
@@ -402,7 +402,7 @@ bool CaptureManager::EnableMixedRecording(const std::wstring& outputPath, AudioF
         break;
 
     case AudioFormat::OPUS:
-        m_mixedOpusEncoder = std::make_unique<OpusEncoder>();
+        m_mixedOpusEncoder = std::make_unique<OpusOggEncoder>();
         encoderReady = m_mixedOpusEncoder->Open(outputPath, waveFormat,
                                                  bitrate > 0 ? bitrate : 128000);
         break;
@@ -488,7 +488,7 @@ void CaptureManager::MixerThread() {
         AudioFormat currentFormat = AudioFormat::WAV;
         WavWriter* wavWriter = nullptr;
         Mp3Encoder* mp3Encoder = nullptr;
-        OpusEncoder* opusEncoder = nullptr;
+        OpusOggEncoder* opusEncoder = nullptr;
         FlacEncoder* flacEncoder = nullptr;
 
         // Get mixed audio data and encoder pointers (with lock held)

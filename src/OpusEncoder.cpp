@@ -3,7 +3,7 @@
 #include <ctime>
 #include <algorithm>
 
-OpusEncoder::OpusEncoder()
+OpusOggEncoder::OpusOggEncoder()
     : m_opusEncoder(nullptr)
     , m_samplesPerFrame(960) // 20ms at 48kHz
     , m_bitrate(128000)
@@ -18,18 +18,18 @@ OpusEncoder::OpusEncoder()
     std::memset(&m_oggPacket, 0, sizeof(ogg_packet));
 }
 
-OpusEncoder::~OpusEncoder() {
+OpusOggEncoder::~OpusOggEncoder() {
     Close();
 }
 
-void OpusEncoder::WriteInt32LE(std::vector<unsigned char>& data, int32_t value) {
+void OpusOggEncoder::WriteInt32LE(std::vector<unsigned char>& data, int32_t value) {
     data.push_back(value & 0xFF);
     data.push_back((value >> 8) & 0xFF);
     data.push_back((value >> 16) & 0xFF);
     data.push_back((value >> 24) & 0xFF);
 }
 
-bool OpusEncoder::Open(const std::wstring& filename, const WAVEFORMATEX* format, UINT32 bitrate) {
+bool OpusOggEncoder::Open(const std::wstring& filename, const WAVEFORMATEX* format, UINT32 bitrate) {
     if (m_file.is_open()) {
         return false;
     }
@@ -62,7 +62,7 @@ bool OpusEncoder::Open(const std::wstring& filename, const WAVEFORMATEX* format,
     m_samplesPerFrame = 960;
 
     // Initialize OGG stream with random serial number
-    m_serialno = std::time(nullptr);
+    m_serialno = static_cast<int>(static_cast<int64_t>(std::time(nullptr)) & 0x7fffffff);
     if (ogg_stream_init(&m_oggStream, m_serialno) != 0) {
         opus_encoder_destroy(m_opusEncoder);
         m_opusEncoder = nullptr;
@@ -87,7 +87,7 @@ bool OpusEncoder::Open(const std::wstring& filename, const WAVEFORMATEX* format,
     return true;
 }
 
-bool OpusEncoder::WriteOggHeaders() {
+bool OpusOggEncoder::WriteOggHeaders() {
     // Create OpusHead header
     std::vector<unsigned char> opusHead;
     opusHead.push_back('O');
@@ -99,12 +99,12 @@ bool OpusEncoder::WriteOggHeaders() {
     opusHead.push_back('a');
     opusHead.push_back('d');
     opusHead.push_back(1); // Version
-    opusHead.push_back(m_format.nChannels); // Channel count
+    opusHead.push_back(static_cast<unsigned char>(m_format.nChannels)); // Channel count
     opusHead.push_back(0); // Pre-skip LSB
     opusHead.push_back(0); // Pre-skip MSB
 
     // Original sample rate (little endian)
-    WriteInt32LE(opusHead, m_format.nSamplesPerSec);
+    WriteInt32LE(opusHead, static_cast<int32_t>(m_format.nSamplesPerSec));
 
     // Output gain (0 dB)
     opusHead.push_back(0);
@@ -115,7 +115,7 @@ bool OpusEncoder::WriteOggHeaders() {
 
     // Create OGG packet for OpusHead
     m_oggPacket.packet = opusHead.data();
-    m_oggPacket.bytes = opusHead.size();
+    m_oggPacket.bytes = static_cast<long>(opusHead.size());
     m_oggPacket.b_o_s = 1; // Beginning of stream
     m_oggPacket.e_o_s = 0;
     m_oggPacket.granulepos = 0;
@@ -145,7 +145,7 @@ bool OpusEncoder::WriteOggHeaders() {
 
     // Vendor string
     std::string vendor = "AudioCapture 1.0";
-    WriteInt32LE(opusTags, vendor.size());
+    WriteInt32LE(opusTags, static_cast<int32_t>(vendor.size()));
     for (char c : vendor) {
         opusTags.push_back(c);
     }
@@ -155,7 +155,7 @@ bool OpusEncoder::WriteOggHeaders() {
 
     // Create OGG packet for OpusTags
     m_oggPacket.packet = opusTags.data();
-    m_oggPacket.bytes = opusTags.size();
+    m_oggPacket.bytes = static_cast<long>(opusTags.size());
     m_oggPacket.b_o_s = 0;
     m_oggPacket.e_o_s = 0;
     m_oggPacket.granulepos = 0;
@@ -175,7 +175,7 @@ bool OpusEncoder::WriteOggHeaders() {
     return true;
 }
 
-bool OpusEncoder::WriteData(const BYTE* data, UINT32 size) {
+bool OpusOggEncoder::WriteData(const BYTE* data, UINT32 size) {
     if (!m_file.is_open() || !m_opusEncoder) {
         return false;
     }
@@ -198,7 +198,7 @@ bool OpusEncoder::WriteData(const BYTE* data, UINT32 size) {
     return true;
 }
 
-bool OpusEncoder::EncodeBuffer() {
+bool OpusOggEncoder::EncodeBuffer() {
     // Prepare PCM samples for encoding
     int frameSamples = m_samplesPerFrame;
     int channels = m_format.nChannels;
@@ -224,7 +224,7 @@ bool OpusEncoder::EncodeBuffer() {
     // Encode frame
     std::vector<unsigned char> opusData(4000); // Max Opus packet size
     int encodedBytes = opus_encode_float(m_opusEncoder, pcmFloat.data(), frameSamples,
-                                         opusData.data(), opusData.size());
+                                         opusData.data(), static_cast<opus_int32>(opusData.size()));
 
     if (encodedBytes < 0) {
         return false; // Encoding error
@@ -235,7 +235,7 @@ bool OpusEncoder::EncodeBuffer() {
 
     // Create OGG packet
     m_oggPacket.packet = opusData.data();
-    m_oggPacket.bytes = encodedBytes;
+    m_oggPacket.bytes = static_cast<long>(encodedBytes);
     m_oggPacket.b_o_s = 0;
     m_oggPacket.e_o_s = 0;
     m_oggPacket.granulepos = m_granulePos;
@@ -256,7 +256,7 @@ bool OpusEncoder::EncodeBuffer() {
     return true;
 }
 
-void OpusEncoder::Close() {
+void OpusOggEncoder::Close() {
     if (!m_file.is_open()) {
         return;
     }
@@ -275,11 +275,11 @@ void OpusEncoder::Close() {
     if (m_opusEncoder) {
         std::vector<unsigned char> emptyPacket(4000);
         int encodedBytes = opus_encode_float(m_opusEncoder, nullptr, 0,
-                                             emptyPacket.data(), emptyPacket.size());
+                                             emptyPacket.data(), static_cast<opus_int32>(emptyPacket.size()));
 
         if (encodedBytes > 0) {
             m_oggPacket.packet = emptyPacket.data();
-            m_oggPacket.bytes = encodedBytes;
+            m_oggPacket.bytes = static_cast<long>(encodedBytes);
             m_oggPacket.b_o_s = 0;
             m_oggPacket.e_o_s = 1; // End of stream
             m_oggPacket.granulepos = m_granulePos;
@@ -306,12 +306,12 @@ void OpusEncoder::Close() {
     m_buffer.clear();
 }
 
-bool OpusEncoder::InitializeOggStream() {
+bool OpusOggEncoder::InitializeOggStream() {
     // Already done in Open()
     return true;
 }
 
-bool OpusEncoder::WriteOggPage(bool flush) {
+bool OpusOggEncoder::WriteOggPage(bool /*flush*/) {
     // Already handled in EncodeBuffer()
     return true;
 }
