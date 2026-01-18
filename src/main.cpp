@@ -980,7 +980,7 @@ void InitializeControls(HWND hwnd) {
 
     // Recording list label
     g_hRecordingListLabel = CreateWindow(
-        L"STATIC", L"Active Recordings:",
+        L"STATIC", L"Active &Recordings:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         10, 400, 200, 20,
         hwnd, (HMENU)IDC_RECORDING_LIST_LABEL, g_hInst, nullptr
