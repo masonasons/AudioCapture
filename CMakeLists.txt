@@ -25,6 +25,7 @@ set(SOURCES
     src/CaptureManager.cpp
     src/AudioDeviceEnumerator.cpp
     src/AudioMixer.cpp
+    resource.rc
 )
 
 set(HEADERS

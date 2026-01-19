@@ -129,6 +129,25 @@ The executable will be in `build\bin\AudioCapture.exe`
    - **Windows 10 2004+**: A list of running processes with their window titles for per-process capture
    - **Older Windows**: Simplified interface for system audio capture only
 
+### Keyboard Shortcuts
+
+- **Alt+A**: Available processes
+- **F5**: Refresh the process list
+- **Alt+H**: Show only processes with active audio
+- **Alt+F**: Format for captured files
+- **Alt+M**: Monitor audio
+- **Alt+I**: Capture inputs (microphone, line-in etc)
+- **Alt+O**: Output Folder
+- **Alt+B**: Browse
+- **Alt+S**: Start/Stop Capture button
+- **Alt+R**: Active Recordings list
+- **Alt+P**: Preset list
+- **Alt+V**: Save Preset
+- **Alt+L**: Load Preset
+- **Alt+D**: Delete Preset
+
+Note: Some controls only appear on Windows 10 2004+ when per-process capture is supported.
+
 ### Basic Capture (Single Process)
 
 1. **Navigate to a Process**: Use arrow keys or click on a process in the list

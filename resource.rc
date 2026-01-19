@@ -1,0 +1,7 @@
+#include <windows.h>
+#include "include/resource.h"
+
+IDR_ACCELERATOR ACCELERATORS
+BEGIN
+    VK_F5, IDC_REFRESH_BTN, VIRTKEY
+END
