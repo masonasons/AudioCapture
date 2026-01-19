@@ -94,6 +94,7 @@ const wchar_t CLASS_NAME[] = L"AudioCaptureWindow";
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void InitializeControls(HWND hwnd);
 void RefreshProcessList();
+void UpdateProcessListLabel();
 void StartCapture();
 void StopCapture();
 void UpdateRecordingList();
@@ -450,6 +451,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case IDC_SHOW_AUDIO_ONLY_CHECKBOX:
             if (wmEvent == BN_CLICKED) {
                 RefreshProcessList();
+                if (g_supportsProcessCapture) {
+                    SetFocus(g_hProcessList);
+                }
             }
             break;
 
@@ -1063,6 +1067,7 @@ void RefreshProcessList() {
 
     // Check if we should filter by active audio
     bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    UpdateProcessListLabel();
 
     int displayedCount = 0;
 
@@ -1143,6 +1148,18 @@ void RefreshProcessList() {
     }
     statusMsg += L".";
     SetWindowText(g_hStatusText, statusMsg.c_str());
+}
+
+void UpdateProcessListLabel() {
+    if (!g_supportsProcessCapture || !g_hProcessListLabel) {
+        return;
+    }
+
+    bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    const wchar_t* labelText = showAudioOnly ?
+        L"&Available processes with active audio:" :
+        L"&Available processes:";
+    SetWindowText(g_hProcessListLabel, labelText);
 }
 
 void StartCapture() {
