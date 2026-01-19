@@ -52,3 +52,6 @@
 #define IDI_TRAY_ICON           3001
 #define IDM_TRAY_SHOW           3002
 #define IDM_TRAY_EXIT           3003
+
+// Accelerator IDs
+#define IDR_ACCELERATOR         4001

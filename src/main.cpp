@@ -22,6 +22,7 @@ using json = nlohmann::json;
 // Global variables
 HINSTANCE g_hInst;
 HWND g_hWnd;
+HACCEL g_hAccel;
 HWND g_hProcessList;
 HWND g_hRefreshBtn;
 HWND g_hStartBtn;
@@ -253,9 +254,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
 
+    g_hAccel = LoadAccelerators(g_hInst, MAKEINTRESOURCE(IDR_ACCELERATOR));
+
     // Message loop with dialog message processing for tab navigation
     MSG msg = {};
     while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (g_hAccel && TranslateAccelerator(g_hWnd, g_hAccel, &msg)) {
+            continue;
+        }
         if (!IsDialogMessage(g_hWnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
