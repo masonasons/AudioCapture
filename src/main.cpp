@@ -693,7 +693,7 @@ void InitializeControls(HWND hwnd) {
 
     // Show audio only checkbox (adjusted position for preset controls)
     g_hShowAudioOnlyCheckbox = CreateWindow(
-        L"BUTTON", L"Show only processes with active audio",
+        L"BUTTON", L"S&how only processes with active audio",
         processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
         120, 248, 280, 20,
         hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
