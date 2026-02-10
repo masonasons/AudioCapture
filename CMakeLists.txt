@@ -91,3 +91,53 @@ if(MSVC)
 else()
     target_compile_options(AudioCapture PRIVATE -Wall -Wextra)
 endif()
+
+# ============================================
+# Command-line version (AudioCaptureCLI)
+# ============================================
+set(CLI_SOURCES
+    src/main_cli.cpp
+    src/AudioCapture.cpp
+    src/WavWriter.cpp
+)
+
+# Create CLI executable (console application)
+add_executable(AudioCaptureCLI ${CLI_SOURCES} ${HEADERS})
+
+# Include directories
+target_include_directories(AudioCaptureCLI PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Link Windows libraries only (no third-party dependencies for CLI)
+target_link_libraries(AudioCaptureCLI PRIVATE
+    Avrt.lib
+    Mmdevapi.lib
+    Ksuser.lib
+    Ole32.lib
+    Propsys.lib
+    RuntimeObject.lib
+    Delayimp.lib
+)
+
+# Enable console subsystem and static runtime
+set_target_properties(AudioCaptureCLI PROPERTIES
+    WIN32_EXECUTABLE FALSE
+    LINK_FLAGS "/DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
+
+# Add compile definitions
+target_compile_definitions(AudioCaptureCLI PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+
+# Enable warnings for CLI
+if(MSVC)
+    target_compile_options(AudioCaptureCLI PRIVATE /W4)
+else()
+    target_compile_options(AudioCaptureCLI PRIVATE -Wall -Wextra)
+endif()

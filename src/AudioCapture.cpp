@@ -2,6 +2,7 @@
 #include <avrt.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <audioclientactivationparams.h>
+#include <Audioclient.h>
 #include <cstring>
 #include <propkey.h>
 #include <propvarutil.h>
@@ -217,14 +218,19 @@ bool AudioCapture::Initialize(DWORD processId) {
             m_isProcessSpecific = true;
             return true;
         }
+        // Do NOT fall back to system-wide capture - return error
+        m_isProcessSpecific = false;
+        return false;
     }
 
-    // Fall back to system-wide capture
+    // System-wide capture only allowed when processId is 0
     m_isProcessSpecific = false;
     return InitializeSystemWideCapture();
 }
 
 bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
+    m_lastError.clear();
+
     // Check Windows version using RtlGetVersion
     typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
     HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
@@ -245,141 +251,134 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         }
     }
 
+    // Require Windows 10 2004 (build 19041) or later for process loopback
+    if (dwMajorVersion < 10 || (dwMajorVersion == 10 && dwBuild < 19041)) {
+        wchar_t buf[256];
+        swprintf_s(buf, L"Windows version too old: %lu.%lu (Build %lu). Requires Build 19041+", 
+                   dwMajorVersion, dwBuild, dwBuild);
+        m_lastError = buf;
+        return false;
+    }
+
     // Use the virtual device for process loopback (not a physical device)
     LPCWSTR deviceId = VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK;
 
-    // Setup activation parameters for process loopback
-    AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
-    activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-    activationParams.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
-    activationParams.ProcessLoopbackParams.TargetProcessId = processId;
+    auto tryActivateProcessLoopback = [&](PROCESS_LOOPBACK_MODE loopbackMode) -> IAudioClient* {
+        AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
+        activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        activationParams.ProcessLoopbackParams.ProcessLoopbackMode = loopbackMode;
+        activationParams.ProcessLoopbackParams.TargetProcessId = processId;
 
-    PROPVARIANT activateParams = {};
-    activateParams.vt = VT_BLOB;
-    activateParams.blob.cbSize = sizeof(activationParams);
-    activateParams.blob.pBlobData = (BYTE*)&activationParams;
+        PROPVARIANT activateParams = {};
+        activateParams.vt = VT_BLOB;
+        activateParams.blob.cbSize = sizeof(activationParams);
+        activateParams.blob.pBlobData = (BYTE*)&activationParams;
 
-    // Create completion handler (starts with refcount = 1)
-    AudioClientActivationHandler* handler = new (std::nothrow) AudioClientActivationHandler();
-    if (!handler || !handler->IsValid()) {
-        if (handler) {
-            handler->Release();
+        // Create completion handler (starts with refcount = 1)
+        AudioClientActivationHandler* handler = new (std::nothrow) AudioClientActivationHandler();
+        if (!handler || !handler->IsValid()) {
+            if (handler) {
+                handler->Release();
+            }
+            return nullptr;
         }
-        return false;
-    }
 
-    // Dynamically load ActivateAudioInterfaceAsync to support older Windows versions
-    // This function only exists on Windows 8+ with WinRT
-    typedef HRESULT (STDAPICALLTYPE *ActivateAudioInterfaceAsyncPtr)(
-        LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*, IActivateAudioInterfaceAsyncOperation**);
+        // Dynamically load ActivateAudioInterfaceAsync to support older Windows versions
+        // This function only exists on Windows 8+ with WinRT
+        typedef HRESULT (STDAPICALLTYPE *ActivateAudioInterfaceAsyncPtr)(
+            LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*, IActivateAudioInterfaceAsyncOperation**);
 
-    HMODULE hMmDevApi = LoadLibraryW(L"Mmdevapi.dll");
-    if (!hMmDevApi) {
-        handler->Release();
-        return false;
-    }
+        HMODULE hMmDevApi = LoadLibraryW(L"Mmdevapi.dll");
+        if (!hMmDevApi) {
+            handler->Release();
+            return nullptr;
+        }
 
-    ActivateAudioInterfaceAsyncPtr pActivateAudioInterfaceAsync =
-        (ActivateAudioInterfaceAsyncPtr)GetProcAddress(hMmDevApi, "ActivateAudioInterfaceAsync");
+        ActivateAudioInterfaceAsyncPtr pActivateAudioInterfaceAsync =
+            (ActivateAudioInterfaceAsyncPtr)GetProcAddress(hMmDevApi, "ActivateAudioInterfaceAsync");
 
-    if (!pActivateAudioInterfaceAsync) {
-        // Function not available (Windows 7 or earlier) - fail gracefully
+        if (!pActivateAudioInterfaceAsync) {
+            // Function not available (Windows 7 or earlier) - fail gracefully
+            FreeLibrary(hMmDevApi);
+            handler->Release();
+            return nullptr;
+        }
+
+        // Start async activation
+        IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+        HRESULT hr = pActivateAudioInterfaceAsync(
+            deviceId,
+            __uuidof(IAudioClient),
+            &activateParams,
+            handler,
+            &asyncOp);
+
         FreeLibrary(hMmDevApi);
+
+        if (FAILED(hr) || !asyncOp) {
+            handler->Release();
+            return nullptr;
+        }
+
+        // Wait for activation to complete (blocks with timeout)
+        bool success = handler->WaitForCompletion(5000);  // 5 second timeout
+
+        // Release the async operation
+        asyncOp->Release();
+
+        if (!success) {
+            handler->Release();
+            return nullptr;
+        }
+
+        // Get the audio client (this AddRefs it for us)
+        IAudioClient* audioClient = handler->GetAudioClient();
+
+        if (!audioClient) {
+            handler->Release();
+            return nullptr;
+        }
+
+        // Release ownership so handler doesn't Release our audio client in its destructor
+        handler->ReleaseOwnership();
+
+        // Release our reference to the handler (may delete it if refcount reaches 0)
         handler->Release();
-        return false;
-    }
 
-    // Start async activation
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    HRESULT hr = pActivateAudioInterfaceAsync(
-        deviceId,
-        __uuidof(IAudioClient),
-        &activateParams,
-        handler,
-        &asyncOp);
+        return audioClient;
+    };
 
-    FreeLibrary(hMmDevApi);
-
-    if (FAILED(hr) || !asyncOp) {
-        handler->Release();
-        return false;
-    }
-
-    // Wait for activation to complete (blocks with timeout)
-    bool success = handler->WaitForCompletion(5000);  // 5 second timeout
-
-    // Release the async operation
-    asyncOp->Release();
-
-    if (!success) {
-        handler->Release();
-        return false;
-    }
-
-    // Get the audio client (this AddRefs it for us)
-    m_audioClient = handler->GetAudioClient();
+    // Use process tree mode (includes target process and its child processes)
+    m_audioClient = tryActivateProcessLoopback(PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE);
 
     if (!m_audioClient) {
-        handler->Release();
+        m_lastError = L"ActivateAudioInterfaceAsync failed for process loopback";
         return false;
     }
 
-    // Release ownership so handler doesn't Release our audio client in its destructor
-    handler->ReleaseOwnership();
+    // Get mix format from default render device (process loopback uses same format)
+    HRESULT hr = E_FAIL;
+    
+    if (m_device) {
+        IAudioClient* tempClient = nullptr;
+        hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&tempClient);
 
-    // Release our reference to the handler (may delete it if refcount reaches 0)
-    handler->Release();
-
-    // Get mix format - for process loopback, GetMixFormat returns E_NOTIMPL
-    // so we need to use the default device's format as a template
-    hr = m_audioClient->GetMixFormat(&m_waveFormat);
-
-    if (FAILED(hr)) {
-        // GetMixFormat not supported on process loopback device
-        // Get format from default device and use it as template
-        if (m_device) {
-            IAudioClient* tempClient = nullptr;
-            hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&tempClient);
-
-            if (SUCCEEDED(hr) && tempClient) {
-                WAVEFORMATEX* defaultFormat = nullptr;
-                hr = tempClient->GetMixFormat(&defaultFormat);
-
-                if (SUCCEEDED(hr) && defaultFormat) {
-                    // Ask the process loopback client what format it will actually use
-                    WAVEFORMATEX* closestMatch = nullptr;
-                    hr = m_audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, defaultFormat, &closestMatch);
-
-                    if (hr == S_OK && defaultFormat) {
-                        // Exact match - use the default format
-                        m_waveFormat = defaultFormat;
-                        defaultFormat = nullptr; // Don't free it
-                    } else if (hr == S_FALSE && closestMatch) {
-                        // Close match provided
-                        m_waveFormat = closestMatch;
-                        closestMatch = nullptr; // Don't free it
-                    } else {
-                        // No match - use default anyway
-                        m_waveFormat = defaultFormat;
-                        defaultFormat = nullptr;
-                    }
-
-                    if (closestMatch) CoTaskMemFree(closestMatch);
-                    if (defaultFormat) CoTaskMemFree(defaultFormat);
-                }
-                tempClient->Release();
-            }
+        if (SUCCEEDED(hr) && tempClient) {
+            hr = tempClient->GetMixFormat(&m_waveFormat);
+            tempClient->Release();
         }
+    }
 
-        if (!m_waveFormat) {
-            m_audioClient->Release();
-            m_audioClient = nullptr;
-            return false;
-        }
+    if (FAILED(hr) || !m_waveFormat) {
+        m_lastError = L"Failed to get audio format from default device";
+        m_audioClient->Release();
+        m_audioClient = nullptr;
+        return false;
     }
 
     // Validate before Initialize
     if (!m_audioClient || !m_waveFormat) {
+        m_lastError = L"Invalid audio client or format";
         if (m_audioClient) {
             m_audioClient->Release();
             m_audioClient = nullptr;
@@ -387,17 +386,44 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         return false;
     }
 
-    // Initialize audio client for loopback capture
-    const REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second
-    hr = m_audioClient->Initialize(
+    // Initialize audio client for process loopback capture
+    // Reference: https://github.com/bozbez/win-capture-audio
+    bool initialized = false;
+    const REFERENCE_TIME hnsRequestedDuration = 2000000; // 200ms buffer
+    HRESULT initHr = E_FAIL;
+
+    // Try with LOOPBACK flag (required for process loopback on some systems)
+    initHr = m_audioClient->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        AUDCLNT_STREAMFLAGS_LOOPBACK,
         hnsRequestedDuration,
         0,
         m_waveFormat,
         nullptr);
+    
+    if (SUCCEEDED(initHr)) {
+        initialized = true;
+    } else {
+        // Try without LOOPBACK flag
+        initHr = m_audioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            hnsRequestedDuration,
+            0,
+            m_waveFormat,
+            nullptr);
+        
+        if (SUCCEEDED(initHr)) {
+            initialized = true;
+        }
+    }
+    
+    hr = initHr;
 
-    if (FAILED(hr)) {
+    if (!initialized) {
+        wchar_t buf[256];
+        swprintf_s(buf, L"AudioClient::Initialize failed (HRESULT: 0x%08X)", hr);
+        m_lastError = buf;
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -410,6 +436,9 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         (void**)&m_captureClient);
 
     if (FAILED(hr) || !m_captureClient) {
+        wchar_t buf[256];
+        swprintf_s(buf, L"GetService(IAudioCaptureClient) failed (HRESULT: 0x%08X)", hr);
+        m_lastError = buf;
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();

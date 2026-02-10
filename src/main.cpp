@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <roapi.h>
 #include <commctrl.h>
 #include <shlwapi.h>
@@ -549,17 +549,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
 
         SetWindowPos(g_hFormatCombo, nullptr, 10, topOffset, 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPathLabel, nullptr, 10, topOffset + 30, 100, 20, SWP_NOZORDER);
-        SetWindowPos(g_hOutputPath, nullptr, 10, topOffset + 50, width - 100, 25, SWP_NOZORDER);
-        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50, 75, 25, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85, 140, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82, 150, 25, SWP_NOZORDER);
-        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115, 210, 30, SWP_NOZORDER);
-        SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115, 100, 30, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingListLabel, nullptr, 10, topOffset + 155, 200, 20, SWP_NOZORDER);
-        SetWindowPos(g_hRecordingList, nullptr, 10, topOffset + 175, width - 20, height - (topOffset + 225), SWP_NOZORDER);
+        const int kVolumeRowGap = 20;
+        const int kOutputSectionOffset = 50;
+        const int kOutputSectionGap = kVolumeRowGap + kOutputSectionOffset;
+        SetWindowPos(g_hOutputPathLabel, nullptr, 10, topOffset + 30 + kOutputSectionGap, 100, 20, SWP_NOZORDER);
+        SetWindowPos(g_hOutputPath, nullptr, 10, topOffset + 50 + kOutputSectionGap, width - 100, 25, SWP_NOZORDER);
+        SetWindowPos(g_hBrowseBtn, nullptr, width - 85, topOffset + 50 + kOutputSectionGap, 75, 25, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingModeLabel, nullptr, 10, topOffset + 85 + kOutputSectionGap, 140, 20, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingModeCombo, nullptr, 150, topOffset + 82 + kOutputSectionGap, 150, 25, SWP_NOZORDER);
+        SetWindowPos(g_hStartBtn, nullptr, 10, topOffset + 115 + kOutputSectionGap, 210, 30, SWP_NOZORDER);
+        SetWindowPos(g_hStopAllBtn, nullptr, 230, topOffset + 115 + kOutputSectionGap, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hPauseAllBtn, nullptr, 340, topOffset + 115 + kOutputSectionGap, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hResumeAllBtn, nullptr, 450, topOffset + 115 + kOutputSectionGap, 100, 30, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingListLabel, nullptr, 10, topOffset + 155 + kOutputSectionGap, 200, 20, SWP_NOZORDER);
+        SetWindowPos(g_hRecordingList, nullptr, 10, topOffset + 175 + kOutputSectionGap, width - 20, height - (topOffset + 225 + kOutputSectionGap), SWP_NOZORDER);
         SetWindowPos(g_hStatusText, nullptr, 10, height - 40, width - 20, 30, SWP_NOZORDER);
         return 0;
     }
@@ -934,7 +937,7 @@ void InitializeControls(HWND hwnd) {
     g_hOutputPathLabel = CreateWindow(
         L"STATIC", L"&Output Folder:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 275, 100, 20,
+        10, 325, 100, 20,
         hwnd, (HMENU)IDC_OUTPUT_PATH_LABEL, g_hInst, nullptr
     );
 
@@ -944,7 +947,7 @@ void InitializeControls(HWND hwnd) {
         L"EDIT",
         GetDefaultOutputPath().c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
-        10, 295, 680, 25,
+        10, 345, 680, 25,
         hwnd, (HMENU)IDC_OUTPUT_PATH, g_hInst, nullptr
     );
 
@@ -952,7 +955,7 @@ void InitializeControls(HWND hwnd) {
     g_hBrowseBtn = CreateWindow(
         L"BUTTON", L"&Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        700, 295, 75, 25,
+        700, 345, 75, 25,
         hwnd, (HMENU)IDC_BROWSE_BTN, g_hInst, nullptr
     );
 
@@ -960,7 +963,7 @@ void InitializeControls(HWND hwnd) {
     g_hStartBtn = CreateWindow(
         L"BUTTON", L"&Start Capture",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        10, 360, 210, 30,
+        10, 410, 210, 30,
         hwnd, (HMENU)IDC_START_BTN, g_hInst, nullptr
     );
 
@@ -968,7 +971,7 @@ void InitializeControls(HWND hwnd) {
     g_hStopAllBtn = CreateWindow(
         L"BUTTON", L"Stop All",
         WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        230, 360, 100, 30,
+        230, 410, 100, 30,
         hwnd, (HMENU)IDC_STOP_ALL_BTN, g_hInst, nullptr
     );
 
@@ -976,7 +979,7 @@ void InitializeControls(HWND hwnd) {
     g_hPauseAllBtn = CreateWindow(
         L"BUTTON", L"Pause All",
         WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        340, 360, 100, 30,
+        340, 410, 100, 30,
         hwnd, (HMENU)IDC_PAUSE_ALL_BTN, g_hInst, nullptr
     );
 
@@ -984,7 +987,7 @@ void InitializeControls(HWND hwnd) {
     g_hResumeAllBtn = CreateWindow(
         L"BUTTON", L"Resume All",
         WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED,
-        450, 360, 100, 30,
+        450, 410, 100, 30,
         hwnd, (HMENU)IDC_RESUME_ALL_BTN, g_hInst, nullptr
     );
 
@@ -992,7 +995,7 @@ void InitializeControls(HWND hwnd) {
     g_hRecordingListLabel = CreateWindow(
         L"STATIC", L"Active &Recordings:",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        10, 400, 200, 20,
+        10, 450, 200, 20,
         hwnd, (HMENU)IDC_RECORDING_LIST_LABEL, g_hInst, nullptr
     );
 
@@ -1002,7 +1005,7 @@ void InitializeControls(HWND hwnd) {
         WC_LISTVIEW,
         L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
-        10, 420, 760, 100,
+        10, 470, 760, 100,
         hwnd,
         (HMENU)IDC_RECORDING_LIST,
         g_hInst,
@@ -1165,6 +1168,8 @@ void UpdateProcessListLabel() {
 void StartCapture() {
     // Get all checked processes
     std::vector<int> checkedIndices;
+    const wchar_t* kSystemAudioLabel = L"[System Audio - All Processes]";
+    bool showedSystemAudioPrompt = false;
 
     // If process capture is not supported, automatically capture system audio (PID 0)
     if (!g_supportsProcessCapture) {
@@ -1173,6 +1178,7 @@ void StartCapture() {
             MessageBox(g_hWnd, L"System audio is already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
             return;
         }
+        MessageBox(g_hWnd, L"当前将采集系统音频（所有进程）。", L"系统音频采集", MB_OK | MB_ICONINFORMATION);
         // Force system audio capture
         checkedIndices.push_back(-1);  // Marker for system audio
     } else {
@@ -1342,6 +1348,11 @@ void StartCapture() {
 
             processName = processNameBuf;
             processId = (DWORD)_wtoi(pidStrBuf);
+        }
+
+        if (!showedSystemAudioPrompt && processName == kSystemAudioLabel) {
+            MessageBox(g_hWnd, L"当前将采集系统音频（所有进程）。", L"系统音频采集", MB_OK | MB_ICONINFORMATION);
+            showedSystemAudioPrompt = true;
         }
 
         // Check if already capturing
