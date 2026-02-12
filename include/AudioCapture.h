@@ -45,6 +45,12 @@ public:
     // Check if currently paused
     bool IsPaused() const { return m_isPaused; }
 
+    // Check if using process-specific capture (vs system-wide)
+    bool IsProcessSpecific() const { return m_isProcessSpecific; }
+
+    // Get last error message (for debugging)
+    const std::wstring& GetLastError() const { return m_lastError; }
+
     // Get audio format information
     WAVEFORMATEX* GetFormat() const { return m_waveFormat; }
 
@@ -82,6 +88,7 @@ private:
     float m_volumeMultiplier;
     bool m_isProcessSpecific;
     bool m_isInputDevice;  // True if capturing from input device (mic), false if loopback
+    std::wstring m_lastError;  // Last error message for debugging
 
     // Passthrough/monitor members
     bool m_passthroughEnabled;
